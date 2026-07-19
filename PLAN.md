@@ -1,7 +1,8 @@
-# Proposal: Bounded Codex Author / Claude Critic Loop
+# Frozen Specification: Bounded Codex Author / Claude Critic Loop
 
-**Status:** Revised draft after five external review passes
-**Date:** 2026-07-19
+**Status:** Frozen version 1 implementation contract
+**Specification version:** `plan-v1.0`
+**Frozen:** 2026-07-19
 **Target environment:** Ubuntu 26.04, Bash, kitty/tmux
 **Installed CLIs observed during planning:** Codex CLI 0.144.6, Claude Code 2.1.215
 
@@ -16,6 +17,14 @@ Build a local, security-sensitive Python execution harness that owns the loop an
 - **Control:** hard round, process, wall-clock, stall, and user-interrupt stops enforced outside both agents.
 
 This is the recommended design for unattended, bounded runs. For a monitored interactive experiment, [`sendbird/cc-plugin-codex`](https://github.com/sendbird/cc-plugin-codex) is the lowest-effort packaged alternative because it keeps Codex as author/host and invokes Claude as reviewer.
+
+## Plan freeze
+
+This document is the frozen implementation contract for version 1. The trust boundaries, canonical subject model, containment topology, agent invocation contracts, credential lifecycle, validation and evidence-declassification rules, state machine, exit codes, pinned platform matrix, and acceptance suite are normative.
+
+Project-specific values may vary only through interfaces already declared by this specification: validation commands, reviewed read-only toolchain mounts, protected/discard-only/non-semantic paths, bounded unchanged context, credential identifiers, and explicitly recorded model choices. These inputs do not reopen the architecture.
+
+Implementation must fail closed when a normative contract cannot be satisfied. It must not silently weaken or redefine version 1. Any normative change requires a successor specification version, a written rationale and security impact, corresponding acceptance-test changes, external review, and a new immutable Git tag. The immutable baseline for this version is the `plan-v1.0` tag.
 
 ## Disposition of external review dated 2026-07-19
 
@@ -51,7 +60,7 @@ The second review was also **approved with changes**. This revision accepts its 
 Two command-level suggestions are deliberately corrected rather than copied literally:
 
 1. **Approval policy:** `codex exec --help` does not list the approval flag because it is a top-level option, but installed Codex CLI 0.144.6 does expose `-a/--ask-for-approval`. The fifth review corrects the canonical invocation to pass `-a never` before `exec` on every author call, while the generated config keeps the same policy as defense in depth.
-2. **Validation backend at this review stage:** `codex sandbox` alone did not prove the full isolation contract, so the draft required capability testing for any backend. The third review below supersedes the multi-backend design: version 1 now has one tested Bubblewrap plus systemd implementation and no fallback.
+2. **Validation backend at this review stage:** `codex sandbox` alone did not prove the full isolation contract, so the then-current plan required capability testing for any backend. The third review below supersedes the multi-backend design: version 1 now has one tested Bubblewrap plus systemd implementation and no fallback.
 
 ## Disposition of third external review dated 2026-07-19
 
@@ -192,7 +201,7 @@ else:
 
 Fatal failures always dominate apparent success. A response received after the captured monotonic deadline is late even if Claude reports `LGTM`. Success still precedes the round-cap and stall checks, so convergence on the final allowed round returns `0`. `LGTM` with a failed, timed-out, unavailable, mutated-subject, evidence-incomplete, or semantic-delta-incomplete state is invalid. Green validations with `REVISE` or `BLOCKED` are not success.
 
-## Proposed command-line interface
+## Command-line interface contract
 
 ```bash
 agent-loop run \
@@ -955,21 +964,18 @@ Good for human-visible terminal fleets, but unnecessary and more brittle for a s
 
 Potential future choices for parallel worktrees, issue queues, and larger task graphs. They add more machinery and trust surface than this single serial loop requires.
 
-## Questions for reviewers
+## Post-freeze implementation inputs
 
-Please challenge these specific decisions:
+Implementation must select and record the following project- or operator-specific values within the frozen interfaces. A choice that requires weakening a normative boundary is out of scope for `plan-v1.0` and must follow the change-control policy below.
 
-1. Is the canonical `SubjectManifest` complete enough to be the only authoritative state across author, validation, review, and progress detection?
-2. Which read-only toolchain/runtime mounts and protected validation paths are required for the first target projects?
-3. Is the account-scoped locked Codex refresh transaction acceptable for local subscription use, or should version 1 instead require API-key authentication despite the cost-model change?
-4. Which unchanged files or generated interface summaries must enter the deterministic critic context to make tool-disabled review useful?
-5. Is two identical canonical non-success states the right exact-stall threshold?
-6. Are the stable exit categories and fatal-first priority sufficient for shell/CI consumers?
-7. What pinned author/critic models and effort levels provide the desired cost/quality balance?
-8. Are normal-host-egress trusted control binaries an acceptable version-1 boundary, or is an audited proxy a release requirement?
-9. Is the default refusal to forward any free-form validation tail too restrictive for useful convergence, even with structured declassifiers?
+1. The target project's fixed baseline and post-author validation commands, including any external protected harness.
+2. The minimum reviewed read-only toolchain/runtime mounts and cache policy needed by those validations.
+3. Project-specific `protected_paths`, `discard_only_paths`, predeclared non-semantic metadata paths, and secret-detection rules.
+4. The bounded unchanged files or generated interface summaries required for useful tool-disabled review.
+5. The account-scoped Codex credential identity, Claude automation-token identity, and operator recovery/rotation procedure.
+6. Explicit author and critic model identifiers and effort levels, recorded in every run manifest rather than treated as hidden defaults.
 
-## Reviewer checklist
+## Frozen implementation conformance checklist
 
 - [ ] Role polarity is Codex author and Claude critic throughout.
 - [ ] Claude cannot mutate repository state.
@@ -1035,12 +1041,14 @@ Please challenge these specific decisions:
 - [systemd process killing behavior](https://manpages.debian.org/unstable/systemd/systemd.kill.5.en.html)
 - [Ubuntu USN-8288-1 Bubblewrap fix](https://ubuntu.com/security/notices/USN-8288-1)
 
-## Requested review output
+## Change-control policy
 
-Reviewers should return:
+`plan-v1.0` changes only through an explicit successor specification. A proposed normative change must:
 
-1. **Verdict:** approve, approve with changes, or reject.
-2. **Blocking issues:** correctness, security, CLI compatibility, or missing failure modes.
-3. **Recommended changes:** concrete edits to this plan.
-4. **Scope concerns:** anything that should move into or out of version 1.
-5. **Implementation risks:** likely sources of brittleness, runaway cost, or data loss.
+1. Open an issue or pull request that identifies the contract being changed, why the frozen contract is insufficient, and the correctness, security, compatibility, and cost effects.
+2. Bump the specification version and preserve the historical review dispositions.
+3. Update every affected acceptance test, failure category, implementation phase, and primary reference.
+4. Receive external review against the complete revised document before merge.
+5. Merge through the repository's normal review path and create a new annotated immutable tag; never move or replace `plan-v1.0`.
+
+Non-normative corrections that do not alter implementation behavior, trust boundaries, or acceptance criteria may be proposed separately, but the `plan-v1.0` tag remains the authoritative frozen baseline.
