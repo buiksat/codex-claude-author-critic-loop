@@ -17,18 +17,18 @@ from .constants import (
 )
 from .errors import AgentLoopError, StopReason, fail
 
-SEVERITIES = frozenset({"critical", "high", "medium", "low"})
-CATEGORIES = frozenset(
-    {
-        "correctness",
-        "security",
-        "reliability",
-        "performance",
-        "maintainability",
-        "testing",
-        "spec_compliance",
-    }
+_SEVERITY_VALUES = ("critical", "high", "medium", "low")
+_CATEGORY_VALUES = (
+    "correctness",
+    "security",
+    "reliability",
+    "performance",
+    "maintainability",
+    "testing",
+    "spec_compliance",
 )
+SEVERITIES = frozenset(_SEVERITY_VALUES)
+CATEGORIES = frozenset(_CATEGORY_VALUES)
 _FINDING_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -95,8 +95,8 @@ def critic_schema_document() -> dict[str, Any]:
         ],
         "properties": {
             "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
-            "severity": {"enum": sorted(SEVERITIES)},
-            "category": {"enum": sorted(CATEGORIES)},
+            "severity": {"enum": list(_SEVERITY_VALUES)},
+            "category": {"enum": list(_CATEGORY_VALUES)},
             "file": {"type": ["string", "null"], "maxLength": DEFAULT_MAX_FIELD_BYTES},
             "symbol": {"type": ["string", "null"], "maxLength": DEFAULT_MAX_FIELD_BYTES},
             "line_start": {"type": ["integer", "null"], "minimum": 1},
@@ -112,6 +112,8 @@ def critic_schema_document() -> dict[str, Any]:
     }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://agent-loop.invalid/schemas/critic-v1.schema.json",
+        "title": "agent-loop critic output v1",
         "type": "object",
         "additionalProperties": False,
         "required": [

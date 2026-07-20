@@ -24,7 +24,7 @@ from agent_loop.runner import (
     ValidationTurn,
 )
 from agent_loop.sandbox import BubblewrapProvenance
-from agent_loop.schemas import CriticReview, Verdict
+from agent_loop.schemas import CriticReview, Verdict, critic_schema_document
 from agent_loop.validation import CheckExecution, ValidationSummary, classify_validations
 
 
@@ -125,6 +125,10 @@ def test_every_schema_document_is_valid_draft_2020_12() -> None:
         assert document["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert document["$id"] not in identifiers
         identifiers.add(document["$id"])
+
+
+def test_packaged_critic_schema_matches_operational_schema() -> None:
+    assert schema("critic-v1.schema.json") == critic_schema_document()
 
 
 def test_subject_schema_accepts_actual_regular_and_symlink_serializer_output() -> None:

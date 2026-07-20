@@ -6,9 +6,9 @@ ran successfully. `partial; live blocked` means deterministic coverage passed bu
 behavioral clause remains unproved. A skip, xfail, simulation, or partial probe is never counted as
 completion.
 
-The post-audit collection contains 540 tests. The portable matrix passed 514 tests with 26
+The post-audit collection contains 542 tests. The portable matrix passed 516 tests with 26
 host/real-CLI tests deselected; the host-marked matrix passed 22 tests; and the complete non-real-CLI
-matrix passed 536 tests with four real-CLI tests deselected. Two separately selected non-model Codex
+matrix passed 538 tests with four real-CLI tests deselected. Two separately selected non-model Codex
 CLI probes passed. The credentialed Codex author and Claude critic nodes were not run. These counts
 do not turn the partial or blocked contracts below into passed contracts.
 
@@ -115,7 +115,7 @@ acceptance step remain outstanding.
 | 49 | Managed Claude boundary | `tests/real_cli/test_live_claude_managed_boundary.py::test_049_live_managed_claude_child_is_scrubbed_confined_and_attested` | blocked |
 | 50 | Hostile Claude project config | `tests/integration/test_claude_client.py::test_050_hostile_claude_project_config_is_not_in_environment_or_cwd` | passed |
 | 51 | Retry budget | all `test_051_*` cases in `tests/integration/test_claude_client.py` prove exact environment settings, bounded simulated schema retry, and typed exhaustion; pinned Claude API/schema retry behavior was not exercised | partial; live behavior unproved |
-| 52 | Schema semantics | all `test_052_*` cases in `tests/unit/test_schemas.py` | passed |
+| 52 | Schema semantics | all `test_052_*` cases in `tests/unit/test_schemas.py` plus `tests/unit/test_schema_documents.py::test_packaged_critic_schema_matches_operational_schema` | passed |
 | 53 | Bundle budgets | `tests/unit/test_prompts.py::test_053_bundle_budgets`, `test_053_changed_file_limit_withholds_the_complete_semantic_delta`, `test_053_findings_limit_fails_before_bundle_construction`, `test_053_task_field_limit_fails_before_bundle_construction`, and `test_053_byte_and_estimated_input_limits_are_independent` cover file, finding, field, byte, estimated-token, and output-reserve limits | passed |
 | 54 | Review limitation | `tests/unit/test_prompts.py::test_054_review_limitation_recorded` and `tests/unit/test_prompts.py::test_054_configured_context_obeys_sensitive_path_rules` | passed |
 | 55 | Hostile return path | `tests/adversarial/test_prompts.py::test_055_hostile_return_path` | passed |
@@ -228,15 +228,15 @@ the existing offline wheel build alone does not satisfy that definition-of-done 
 | Date | Command | Result |
 |---|---|---|
 | 2026-07-19 | environment/version/provenance inspection | passed; exact values recorded above |
-| 2026-07-19 | `python3.14 -m pytest --collect-only -q` | passed; 540 tests collected |
-| 2026-07-19 | `python3.14 -m pytest -q -m 'not host and not real_cli'` | passed; 514 passed, 26 deselected |
-| 2026-07-19 | `python3.14 -m pytest -q -m host` | passed; 22 passed, 518 deselected |
-| 2026-07-19 | `python3.14 -m pytest -q tests/host` | passed; 21 passed |
+| 2026-07-20 | `python3.14 -m pytest --collect-only -q` | passed; 542 tests collected |
+| 2026-07-20 | `python3.14 -m pytest -q -m 'not host and not real_cli'` | passed; 516 passed, 26 deselected |
+| 2026-07-20 | `python3.14 -m pytest -q -m host` | passed; 22 passed, 520 deselected |
+| 2026-07-20 | `python3.14 -m pytest -q tests/host` | passed; 21 passed |
 | 2026-07-19 | `AGENT_LOOP_ALLOW_LIVE=1 AGENT_LOOP_CODEX_CREDENTIAL_ID=nonmodel-probe AGENT_LOOP_CODEX_PATH=/home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js python3.14 -m pytest -q tests/real_cli/test_codex_cli.py::test_pinned_codex_non_model_version_and_help_capabilities tests/real_cli/test_codex_cli.py::test_066_pinned_prompt_input_probe_ignores_additional_root_instructions` | passed; 2 passed |
-| 2026-07-19 | `python3.14 -m pytest -q -m 'not real_cli'` | passed; 536 passed, 4 deselected |
-| 2026-07-19 | `python3.14 -m compileall -q src tests` | passed |
+| 2026-07-20 | `python3.14 -m pytest -q -m 'not real_cli'` | passed; 538 passed, 4 deselected |
+| 2026-07-20 | `python3.14 -m compileall -q src tests` | passed |
 | 2026-07-19 | `python3.14 -m build` | blocked; installed namespace has no `build.__main__`; no install attempted |
-| 2026-07-19 | `PIP_NO_INDEX=1 python3.14 -m pip wheel . --no-cache-dir --no-build-isolation --no-deps --wheel-dir "$(mktemp -d)"` | passed; wheel built offline and packaged the frozen plan, status, schemas, and console entry point; no clean install performed |
+| 2026-07-20 | `PIP_NO_INDEX=1 python3.14 -m pip wheel . --no-cache-dir --no-build-isolation --no-deps --wheel-dir "$(mktemp -d)"` | passed; wheel built offline and packaged the frozen plan, status, schemas, and console entry point; no clean install performed |
 | 2026-07-19 | wheel content inspection and `PYTHONPATH=src python3.14 -m agent_loop.cli --help` | passed; package data present and exactly `run`, `status`, `show` exposed |
 
 The credentialed Codex/Claude smoke nodes were not run. Their blocked status is intentional until

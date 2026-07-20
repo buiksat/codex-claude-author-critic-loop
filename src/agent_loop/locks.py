@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import socket
 import stat
 import time
 from dataclasses import dataclass
@@ -74,6 +75,8 @@ class SourceRunLock:
                     "schema_version": 1,
                     "run_id": run_id,
                     "pid": os.getpid(),
+                    "hostname": socket.gethostname(),
+                    "canonical_source": os.fspath(source),
                     "source_sha256": key,
                     "started_wall_time": time.time(),
                 },

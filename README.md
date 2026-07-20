@@ -350,8 +350,8 @@ python3.14 -m pytest -q -m 'not real_cli'
 python3.14 -m compileall -q src tests
 ```
 
-At this revision, pytest collected 540 tests; 514 portable tests and 22 host-marked tests passed,
-and the combined non-real-CLI selection passed 536 tests. These results do not include the four
+At this revision, pytest collected 542 tests; 516 portable tests and 22 host-marked tests passed,
+and the combined non-real-CLI selection passed 538 tests. These results do not include the four
 real-CLI nodes. The two non-model Codex probes were also run separately; the credentialed Codex and
 Claude model nodes were not run.
 
