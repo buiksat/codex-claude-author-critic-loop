@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools==78.1.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-loop"
+version = "1.0.0"
+description = "Containment-first bounded Codex author / Claude critic loop"
+readme = "README.md"
+requires-python = "==3.14.4"
+license = "Apache-2.0"
+authors = [{ name = "agent-loop contributors" }]
+keywords = ["agent", "containment", "codex", "claude", "review"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.scripts]
+agent-loop = "agent_loop.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.data-files]
+"share/agent-loop" = ["PLAN.md"]
+"share/agent-loop/docs" = ["docs/IMPLEMENTATION_STATUS.md"]
+"share/agent-loop/schemas" = ["schemas/*.json"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers --import-mode=importlib"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "host: requires the pinned Ubuntu Bubblewrap/systemd target",
+  "real_cli: opt-in pinned CLI probe; paid nodes also require explicit authorization and provisioned credentials",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "RUF"]
+ignore = ["S101"]
+
+# These modules intentionally launch fixed, shell-free argv under the reviewed containment and
+# lifecycle boundaries. The named tests exercise those same subprocess boundaries.
+[tool.ruff.lint.per-file-ignores]
+"src/agent_loop/sandbox_init.py" = ["S404", "S603"]
+"src/agent_loop/service.py" = ["S404", "S603"]
+"tests/host/test_limits.py" = ["S404", "S603"]
+"tests/host/test_network_boundary.py" = ["S404", "S603"]
+"tests/host/test_process_isolation.py" = ["S404", "S603"]
+"tests/host/test_sandbox.py" = ["S404", "S603"]
+"tests/integration/test_runtime_adapters.py" = ["S404", "S603"]
+"tests/integration/test_sandbox_init.py" = ["S404", "S603"]
+"tests/unit/test_sandbox.py" = ["S404"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+show_error_codes = true

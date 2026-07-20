@@ -1,0 +1,47 @@
+from agent_loop.errors import ExitCode, StopReason, exit_code_for
+
+
+def test_063_stable_exits() -> None:
+    expected = {
+        StopReason.CONVERGED: ExitCode.SUCCESS,
+        StopReason.ROUND_CAP_REACHED: ExitCode.ROUND_CAP,
+        StopReason.STALLED: ExitCode.STALLED,
+        StopReason.AUTHOR_TIMEOUT: ExitCode.TIMEOUT,
+        StopReason.CRITIC_TIMEOUT: ExitCode.TIMEOUT,
+        StopReason.VALIDATION_TIMEOUT: ExitCode.TIMEOUT,
+        StopReason.WALL_CLOCK_DEADLINE_EXCEEDED: ExitCode.TIMEOUT,
+        StopReason.USER_INTERRUPT: ExitCode.INTERRUPTED,
+        StopReason.INVALID_STRUCTURED_OUTPUT: ExitCode.INVALID_CRITIC,
+        StopReason.CRITIC_LGTM_WITH_FAILED_VALIDATION: ExitCode.INVALID_CRITIC,
+        StopReason.CRITIC_BLOCKED: ExitCode.CRITIC_BLOCKED,
+        StopReason.AUTHOR_PROCESS_FAILURE: ExitCode.PROCESS_FAILURE,
+        StopReason.CRITIC_PROCESS_FAILURE: ExitCode.PROCESS_FAILURE,
+        StopReason.VALIDATION_PROCESS_FAILURE: ExitCode.PROCESS_FAILURE,
+        StopReason.CRITIC_MAX_TURNS_EXHAUSTED: ExitCode.PROCESS_FAILURE,
+        StopReason.AGENT_OUTPUT_LIMIT: ExitCode.PROCESS_FAILURE,
+        StopReason.STRUCTURED_OUTPUT_RETRIES: ExitCode.PROCESS_FAILURE,
+        StopReason.REVIEW_BUNDLE_TOO_LARGE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.REVIEW_CONTENT_WITHHELD: ExitCode.INTEGRITY_FAILURE,
+        StopReason.REVIEW_EVIDENCE_WITHHELD: ExitCode.INTEGRITY_FAILURE,
+        StopReason.UNSAFE_OR_AMBIGUOUS_PATH: ExitCode.INTEGRITY_FAILURE,
+        StopReason.UNSAFE_FILE_TYPE_OR_HARD_LINK: ExitCode.INTEGRITY_FAILURE,
+        StopReason.PROTECTED_SUBJECT_PATH_CHANGED: ExitCode.INTEGRITY_FAILURE,
+        StopReason.VALIDATION_MUTATED_SUBJECT: ExitCode.INTEGRITY_FAILURE,
+        StopReason.OUT_OF_BAND_CHANGE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.SANDBOX_SETUP_FAILURE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.BASELINE_INFRASTRUCTURE_FAILURE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.GIT_POLICY_OR_OUTPUT_FAILURE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.AUTHOR_SERVICE_NOT_EMPTY: ExitCode.INTEGRITY_FAILURE,
+        StopReason.BWRAP_PACKAGE_OR_MODE_UNSAFE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.REPOSITORY_SHAPE_UNSUPPORTED: ExitCode.INTEGRITY_FAILURE,
+        StopReason.PROJECT_INSTRUCTION_ISOLATION: ExitCode.INTEGRITY_FAILURE,
+        StopReason.GITLESS_INVOCATION_PROBE_FAILED: ExitCode.INTEGRITY_FAILURE,
+        StopReason.CREDENTIAL_STATE_CONFLICT: ExitCode.INTEGRITY_FAILURE,
+        StopReason.CREDENTIAL_REFRESH_FAILURE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.DIAGNOSTIC_PATCH_FAILURE: ExitCode.INTEGRITY_FAILURE,
+        StopReason.SERVICE_LIFECYCLE_MISMATCH: ExitCode.INTEGRITY_FAILURE,
+        StopReason.RUNNER_INTERNAL_ERROR: ExitCode.INTERNAL_ERROR,
+    }
+
+    assert set(expected) == set(StopReason)
+    assert {reason: exit_code_for(reason) for reason in StopReason} == expected

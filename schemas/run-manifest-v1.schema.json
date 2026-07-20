@@ -1,0 +1,418 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop.invalid/schemas/run-manifest-v1.schema.json",
+  "title": "agent-loop retained run journal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "pid",
+    "hostname",
+    "status",
+    "metadata_content_withheld",
+    "base_subject_fingerprint",
+    "current_subject_fingerprint",
+    "monotonic_deadline",
+    "current_round",
+    "max_rounds",
+    "max_runtime_seconds",
+    "protected_patterns",
+    "opaque_patterns",
+    "requested_author_model",
+    "requested_author_effort",
+    "requested_critic_model",
+    "requested_critic_effort",
+    "max_raw_log_bytes",
+    "limits",
+    "source_revision",
+    "source_tree_object_id",
+    "canonical_source",
+    "source_warnings",
+    "environment",
+    "credential_identifiers"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "pid": { "type": "integer", "minimum": 1 },
+    "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "status": { "enum": ["running", "converged", "stopped"] },
+    "metadata_content_withheld": { "type": "boolean" },
+    "base_subject_fingerprint": { "$ref": "#/$defs/digest" },
+    "current_subject_fingerprint": { "$ref": "#/$defs/digest" },
+    "monotonic_deadline": { "type": "number", "minimum": 0 },
+    "current_round": { "type": "integer", "minimum": 0 },
+    "max_rounds": { "type": "integer", "minimum": 1 },
+    "max_runtime_seconds": { "type": "number", "exclusiveMinimum": 0 },
+    "protected_patterns": { "$ref": "#/$defs/patternList" },
+    "opaque_patterns": { "$ref": "#/$defs/patternList" },
+    "requested_author_model": { "$ref": "#/$defs/nullableFact" },
+    "requested_author_effort": { "$ref": "#/$defs/nullableFact" },
+    "requested_critic_model": { "$ref": "#/$defs/nullableFact" },
+    "requested_critic_effort": { "$ref": "#/$defs/nullableFact" },
+    "max_raw_log_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 33554432
+    },
+    "limits": { "$ref": "#/$defs/limits" },
+    "source_revision": { "$ref": "#/$defs/gitObjectId" },
+    "source_tree_object_id": { "$ref": "#/$defs/gitObjectId" },
+    "canonical_source": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "source_warnings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 32768 }
+    },
+    "environment": { "$ref": "#/$defs/environment" },
+    "credential_identifiers": { "$ref": "#/$defs/credentialIdentifiers" },
+    "codex_thread_id": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$"
+        }
+      ]
+    },
+    "observed_author_model": { "$ref": "#/$defs/nullableFact" },
+    "observed_author_effort": { "$ref": "#/$defs/nullableFact" },
+    "codex_usage": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/codexUsage" }
+      ]
+    },
+    "critic_completed_at": { "type": "number", "minimum": 0 },
+    "observed_critic_model": { "$ref": "#/$defs/nullableFact" },
+    "observed_critic_effort": { "$ref": "#/$defs/nullableFact" },
+    "claude_total_cost_usd": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "stop_reason": { "$ref": "#/$defs/stopReason" },
+    "exit_code": { "enum": [0, 10, 11, 12, 13, 14, 15, 16, 17, 18] },
+    "stop_detail": { "type": "string", "maxLength": 32768 },
+    "rounds_completed": { "type": "integer", "minimum": 0 }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "running" } },
+        "required": ["status"]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["stop_reason"] },
+            { "required": ["exit_code"] },
+            { "required": ["stop_detail"] },
+            { "required": ["rounds_completed"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "enum": ["converged", "stopped"] } },
+        "required": ["status"]
+      },
+      "then": {
+        "required": [
+          "stop_reason",
+          "exit_code",
+          "stop_detail",
+          "rounds_completed",
+          "codex_thread_id"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "converged" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "stop_reason": { "const": "converged" },
+          "exit_code": { "const": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "stopped" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "stop_reason": {
+            "allOf": [
+              { "$ref": "#/$defs/stopReason" },
+              { "not": { "const": "converged" } }
+            ]
+          },
+          "exit_code": { "enum": [10, 11, 12, 13, 14, 15, 16, 17, 18] }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "nullableFact": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 256 }
+      ]
+    },
+    "patternList": {
+      "type": "array",
+      "maxItems": 20000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32768
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_files",
+        "max_file_bytes",
+        "max_total_subject_bytes",
+        "max_path_bytes",
+        "max_path_depth",
+        "max_bundle_bytes",
+        "max_estimated_input_tokens",
+        "reserved_output_tokens",
+        "max_findings",
+        "max_field_bytes",
+        "max_agent_output_bytes",
+        "max_raw_log_bytes",
+        "workspace_bytes",
+        "memory_max_bytes",
+        "tasks_max",
+        "limit_fsize_bytes",
+        "limit_nofile"
+      ],
+      "properties": {
+        "max_files": { "type": "integer", "minimum": 1, "maximum": 20000 },
+        "max_file_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "max_total_subject_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 268435456
+        },
+        "max_path_bytes": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "max_path_depth": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_bundle_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "max_estimated_input_tokens": {
+          "type": "integer", "minimum": 1, "maximum": 64000
+        },
+        "reserved_output_tokens": {
+          "type": "integer", "minimum": 8192, "maximum": 72191
+        },
+        "max_findings": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_field_bytes": { "type": "integer", "minimum": 1, "maximum": 32768 },
+        "max_agent_output_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 16777216
+        },
+        "max_raw_log_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 33554432
+        },
+        "workspace_bytes": { "type": "integer", "minimum": 1, "maximum": 536870912 },
+        "memory_max_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 1073741824
+        },
+        "tasks_max": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "limit_fsize_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 67108864
+        },
+        "limit_nofile": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
+    "codexUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "cached_input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "reasoning_output_tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "credentialIdentifiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codex", "claude"],
+      "properties": {
+        "codex": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "claude": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        }
+      }
+    },
+    "trustedExecutable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_path",
+        "resolved_path",
+        "owner_uid",
+        "mode",
+        "sha256",
+        "version"
+      ],
+      "properties": {
+        "requested_path": { "type": "string", "minLength": 2, "maxLength": 4096 },
+        "resolved_path": { "type": "string", "minLength": 2, "maxLength": 4096 },
+        "owner_uid": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "string", "pattern": "^[0-7]{4}$" },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "bubblewrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package_version",
+        "upstream_version",
+        "executable",
+        "owner_uid",
+        "owner_gid",
+        "mode",
+        "sha256"
+      ],
+      "properties": {
+        "package_version": { "const": "0.11.1-1ubuntu0.1" },
+        "upstream_version": { "const": "0.11.1" },
+        "executable": { "const": "/usr/bin/bwrap" },
+        "owner_uid": { "const": 0 },
+        "owner_gid": { "const": 0 },
+        "mode": { "const": "0755" },
+        "sha256": {
+          "const": "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os_id",
+        "os_version",
+        "machine",
+        "kernel",
+        "python",
+        "git",
+        "systemd",
+        "bash",
+        "bubblewrap",
+        "python_executable",
+        "codex",
+        "claude",
+        "openat2",
+        "namespace_probe",
+        "transient_service_probe"
+      ],
+      "properties": {
+        "os_id": { "const": "ubuntu" },
+        "os_version": { "const": "26.04" },
+        "machine": { "const": "x86_64" },
+        "kernel": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "python": { "const": "3.14.4" },
+        "git": { "const": "git version 2.53.0" },
+        "systemd": { "const": "systemd 259 (259.5-0ubuntu3)" },
+        "bash": { "type": "string", "pattern": "version 5\\.3\\." },
+        "bubblewrap": { "$ref": "#/$defs/bubblewrap" },
+        "python_executable": {
+          "allOf": [
+            { "$ref": "#/$defs/trustedExecutable" },
+            { "properties": { "version": { "const": "Python 3.14.4" } } }
+          ]
+        },
+        "codex": {
+          "allOf": [
+            { "$ref": "#/$defs/trustedExecutable" },
+            { "properties": { "version": { "const": "codex-cli 0.144.6" } } }
+          ]
+        },
+        "claude": {
+          "allOf": [
+            { "$ref": "#/$defs/trustedExecutable" },
+            { "properties": { "version": { "const": "2.1.215 (Claude Code)" } } }
+          ]
+        },
+        "openat2": { "const": true },
+        "namespace_probe": { "type": "boolean" },
+        "transient_service_probe": { "type": "boolean" }
+      }
+    },
+    "stopReason": {
+      "enum": [
+        "converged",
+        "round_cap_reached",
+        "stalled",
+        "author_timeout",
+        "critic_timeout",
+        "validation_timeout",
+        "wall_clock_deadline_exceeded",
+        "user_interrupt",
+        "invalid_structured_output",
+        "critic_lgtm_with_failed_validation",
+        "critic_blocked",
+        "author_process_failure",
+        "critic_process_failure",
+        "validation_process_failure",
+        "critic_max_turns_exhausted",
+        "agent_output_limit",
+        "structured_output_retries",
+        "review_bundle_too_large",
+        "review_content_withheld",
+        "review_evidence_withheld",
+        "unsafe_or_ambiguous_path",
+        "unsafe_file_type_or_hard_link",
+        "protected_subject_path_changed",
+        "validation_mutated_subject",
+        "out_of_band_change",
+        "sandbox_setup_failure",
+        "baseline_infrastructure_failure",
+        "git_policy_or_output_failure",
+        "author_service_not_empty",
+        "bwrap_package_or_mode_unsafe",
+        "repository_shape_unsupported",
+        "project_instruction_isolation",
+        "gitless_invocation_probe_failed",
+        "credential_state_conflict",
+        "credential_refresh_failure",
+        "diagnostic_patch_failure",
+        "service_lifecycle_mismatch",
+        "runner_internal_error"
+      ]
+    }
+  }
+}

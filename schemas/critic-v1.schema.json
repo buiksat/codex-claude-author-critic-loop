@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop.invalid/schemas/critic-v1.schema.json",
+  "title": "agent-loop critic output v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdict",
+    "summary",
+    "blocked_reason",
+    "blocking_findings",
+    "non_blocking_findings"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "verdict": { "enum": ["LGTM", "REVISE", "BLOCKED"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 32768 },
+    "blocked_reason": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 32768 }
+      ]
+    },
+    "blocking_findings": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "non_blocking_findings": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "category",
+        "file",
+        "symbol",
+        "line_start",
+        "line_end",
+        "problem",
+        "evidence",
+        "required_fix"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+        "severity": { "enum": ["critical", "high", "medium", "low"] },
+        "category": {
+          "enum": [
+            "correctness",
+            "security",
+            "reliability",
+            "performance",
+            "maintainability",
+            "testing",
+            "spec_compliance"
+          ]
+        },
+        "file": { "type": ["string", "null"], "maxLength": 32768 },
+        "symbol": { "type": ["string", "null"], "maxLength": 32768 },
+        "line_start": { "type": ["integer", "null"], "minimum": 1 },
+        "line_end": { "type": ["integer", "null"], "minimum": 1 },
+        "problem": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "evidence": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "required_fix": { "type": "string", "minLength": 1, "maxLength": 32768 }
+      }
+    }
+  }
+}

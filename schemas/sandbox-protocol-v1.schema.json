@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop.invalid/schemas/sandbox-protocol-v1.schema.json",
+  "title": "agent-loop sandbox supervisor protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "blob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "data_b64"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/digest" },
+        "data_b64": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "manifestEntry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path_b64", "path_display", "kind", "mode", "size", "blob_sha256"],
+          "properties": {
+            "path_b64": { "type": "string", "contentEncoding": "base64" },
+            "path_display": { "type": "string" },
+            "kind": { "const": "regular" },
+            "mode": { "enum": ["100644", "100755"] },
+            "size": { "type": "integer", "minimum": 0 },
+            "blob_sha256": { "$ref": "#/$defs/digest" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path_b64", "path_display", "kind", "mode", "target_b64", "target_sha256"],
+          "properties": {
+            "path_b64": { "type": "string", "contentEncoding": "base64" },
+            "path_display": { "type": "string" },
+            "kind": { "const": "symlink" },
+            "mode": { "const": "120000" },
+            "target_b64": { "type": "string", "contentEncoding": "base64" },
+            "target_sha256": { "$ref": "#/$defs/digest" }
+          }
+        }
+      ]
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "fingerprint", "entries"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "fingerprint": { "$ref": "#/$defs/digest" },
+        "entries": {
+          "type": "array",
+          "maxItems": 20000,
+          "items": { "$ref": "#/$defs/manifestEntry" }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeout_ms",
+        "terminate_grace_ms",
+        "max_output_bytes",
+        "max_export_bytes",
+        "max_files",
+        "max_file_bytes",
+        "max_total_subject_bytes",
+        "max_path_bytes",
+        "max_path_depth"
+      ],
+      "properties": {
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 2700000 },
+        "terminate_grace_ms": { "type": "integer", "minimum": 1, "maximum": 5000 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 46836396 },
+        "max_export_bytes": { "type": "integer", "minimum": 33792, "maximum": 374691160 },
+        "max_files": { "type": "integer", "minimum": 1, "maximum": 20000 },
+        "max_file_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "max_total_subject_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "max_path_bytes": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "max_path_depth": { "type": "integer", "minimum": 1, "maximum": 128 }
+      }
+    },
+    "normalLimits": {
+      "allOf": [
+        { "$ref": "#/$defs/limits" },
+        {
+          "properties": {
+            "max_output_bytes": { "type": "integer", "maximum": 16777216 }
+          }
+        }
+      ]
+    },
+    "batchLimits": {
+      "allOf": [
+        { "$ref": "#/$defs/limits" },
+        {
+          "properties": {
+            "max_output_bytes": { "const": 46836396 }
+          }
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "argv": {
+                "const": ["/opt/agent-loop-runtime/agent_loop/.validation-batch-v1"]
+              }
+            },
+            "required": ["argv"]
+          },
+          "then": {
+            "properties": {
+              "cwd": { "const": "/workspace" },
+              "env": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"],
+                "properties": {
+                  "PATH": { "const": "/usr/bin:/bin" },
+                  "HOME": { "const": "/runtime/home" },
+                  "TMPDIR": { "const": "/runtime/tmp" },
+                  "LANG": { "const": "C.UTF-8" },
+                  "LC_ALL": { "const": "C.UTF-8" },
+                  "TZ": { "const": "UTC" }
+                }
+              },
+              "limits": { "$ref": "#/$defs/batchLimits" }
+            }
+          },
+          "else": {
+            "properties": {
+              "limits": { "$ref": "#/$defs/normalLimits" }
+            }
+          }
+        }
+      ],
+      "required": [
+        "protocol_version",
+        "kind",
+        "manifest",
+        "blobs",
+        "argv",
+        "env",
+        "cwd",
+        "stdin_b64",
+        "limits"
+      ],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "kind": { "const": "request" },
+        "manifest": { "$ref": "#/$defs/manifest" },
+        "blobs": { "type": "array", "maxItems": 20000, "items": { "$ref": "#/$defs/blob" } },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1, "maxLength": 32768 }
+        },
+        "env": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "enum": [
+              "PATH",
+              "HOME",
+              "TMPDIR",
+              "LANG",
+              "LC_ALL",
+              "TZ",
+              "TERM",
+              "CODEX_HOME",
+              "CLAUDE_CODE_OAUTH_TOKEN",
+              "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+              "CLAUDE_CODE_MAX_RETRIES",
+              "API_TIMEOUT_MS",
+              "MAX_STRUCTURED_OUTPUT_RETRIES",
+              "CLAUDE_CONFIG_DIR",
+              "CLAUDE_CODE_TMPDIR"
+            ]
+          },
+          "additionalProperties": { "type": "string", "maxLength": 32768 }
+        },
+        "cwd": {
+          "enum": [
+            "/workspace",
+            "/runtime/author-cwd",
+            "/runtime/critic-cwd",
+            "/runtime/git-cwd"
+          ]
+        },
+        "stdin_b64": { "type": "string", "contentEncoding": "base64" },
+        "limits": { "$ref": "#/$defs/limits" }
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "returncode",
+        "timed_out",
+        "output_limited",
+        "duration_ms",
+        "stdout_b64",
+        "stderr_b64"
+      ],
+      "properties": {
+        "returncode": { "type": "integer" },
+        "timed_out": { "type": "boolean" },
+        "output_limited": { "type": "boolean" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "stdout_b64": { "type": "string", "contentEncoding": "base64" },
+        "stderr_b64": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminated_pids", "namespace_empty", "export_started_after_cleanup"],
+      "properties": {
+        "terminated_pids": { "type": "integer", "minimum": 0 },
+        "namespace_empty": { "const": true },
+        "export_started_after_cleanup": { "const": true }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "kind",
+        "base_fingerprint",
+        "process",
+        "cleanup",
+        "candidate_manifest",
+        "new_blobs"
+      ],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "kind": { "const": "result" },
+        "base_fingerprint": { "$ref": "#/$defs/digest" },
+        "process": { "$ref": "#/$defs/process" },
+        "cleanup": { "$ref": "#/$defs/cleanup" },
+        "candidate_manifest": { "$ref": "#/$defs/manifest" },
+        "new_blobs": { "type": "array", "maxItems": 20000, "items": { "$ref": "#/$defs/blob" } }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "kind", "error"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "kind": { "const": "error" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason", "detail"],
+          "properties": {
+            "reason": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "detail": { "type": "string", "maxLength": 32768 }
+          }
+        }
+      }
+    }
+  }
+}

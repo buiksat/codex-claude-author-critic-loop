@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop.invalid/schemas/subject-manifest-v1.schema.json",
+  "title": "agent-loop canonical subject manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fingerprint", "entries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fingerprint": { "$ref": "#/$defs/digest" },
+    "entries": {
+      "type": "array",
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "base64Path": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 5464,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "contentEncoding": "base64"
+    },
+    "displayPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^[ -~]+$"
+    },
+    "entry": {
+      "oneOf": [
+        { "$ref": "#/$defs/regularEntry" },
+        { "$ref": "#/$defs/symlinkEntry" }
+      ]
+    },
+    "regularEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path_b64",
+        "path_display",
+        "kind",
+        "mode",
+        "size",
+        "blob_sha256"
+      ],
+      "properties": {
+        "path_b64": { "$ref": "#/$defs/base64Path" },
+        "path_display": { "$ref": "#/$defs/displayPath" },
+        "kind": { "const": "regular" },
+        "mode": { "enum": ["100644", "100755"] },
+        "size": { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "blob_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "symlinkEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path_b64",
+        "path_display",
+        "kind",
+        "mode",
+        "target_b64",
+        "target_sha256"
+      ],
+      "properties": {
+        "path_b64": { "$ref": "#/$defs/base64Path" },
+        "path_display": { "$ref": "#/$defs/displayPath" },
+        "kind": { "const": "symlink" },
+        "mode": { "const": "120000" },
+        "target_b64": { "$ref": "#/$defs/base64Path" },
+        "target_sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

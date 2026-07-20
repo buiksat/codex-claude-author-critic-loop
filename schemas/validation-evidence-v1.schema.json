@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop.invalid/schemas/validation-evidence-v1.schema.json",
+  "title": "agent-loop declassified validation evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "subject_fingerprint",
+    "approval_eligible",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "subject_fingerprint": { "$ref": "#/$defs/digest" },
+    "approval_eligible": { "type": "boolean" },
+    "checks": {
+      "type": "array",
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/checkEvidence" }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "timed_out",
+        "output_limited",
+        "process_failure",
+        "infrastructure_failure"
+      ]
+    },
+    "transition": {
+      "enum": [
+        "pass_to_pass",
+        "pass_to_fail",
+        "fail_to_pass",
+        "fail_to_fail",
+        "no_baseline"
+      ]
+    },
+    "nullableInteger": {
+      "type": ["integer", "null"]
+    },
+    "checkEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_id",
+        "exit_code",
+        "signal",
+        "baseline_outcome",
+        "current_outcome",
+        "transition",
+        "regression",
+        "evidence_complete"
+      ],
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "exit_code": { "$ref": "#/$defs/nullableInteger" },
+        "signal": { "$ref": "#/$defs/nullableInteger" },
+        "baseline_outcome": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/outcome" }
+          ]
+        },
+        "current_outcome": { "$ref": "#/$defs/outcome" },
+        "transition": { "$ref": "#/$defs/transition" },
+        "regression": { "type": "boolean" },
+        "evidence_complete": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "current_outcome": { "enum": ["passed", "failed"] }
+            },
+            "required": ["current_outcome"]
+          },
+          "then": {
+            "properties": { "evidence_complete": { "const": true } }
+          },
+          "else": {
+            "properties": { "evidence_complete": { "const": false } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "transition": { "const": "no_baseline" } },
+            "required": ["transition"]
+          },
+          "then": {
+            "properties": { "baseline_outcome": { "type": "null" } }
+          },
+          "else": {
+            "properties": {
+              "baseline_outcome": { "$ref": "#/$defs/outcome" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
