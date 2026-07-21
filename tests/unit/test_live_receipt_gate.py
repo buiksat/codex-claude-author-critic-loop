@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_loop.constants import SUPPORTED_CLAUDE_VERSION, SUPPORTED_CODEX_VERSION
 from tests import conftest as root_conftest
-from agent_loop.constants import SUPPORTED_CODEX_VERSION
 from tests.real_cli import live_support
 from tests.real_cli.live_support import (
     LiveGateConfigurationError,
@@ -109,6 +109,51 @@ def test_each_pytest_session_resets_receipt_ledger_and_observed_selectors() -> N
     assert root_conftest._LEDGER.eligible(int(pytest.ExitCode.OK)) is False
     assert live_support._OBSERVED_VALUES == {}
     assert live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY is None
+
+
+def test_host_preflight_uses_immutable_defaults_outside_live_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENT_LOOP_ALLOW_LIVE", raising=False)
+    monkeypatch.setenv("AGENT_LOOP_CLAUDE_INSTALL_RELATIVE", "untrusted-ambient-value")
+
+    def reject_live_install(tool: str) -> None:
+        pytest.fail(f"ordinary host preflight consulted live {tool} selectors")
+
+    monkeypatch.setattr(live_support, "required_install", reject_live_install)
+
+    codex, claude = live_support.selected_host_preflight_executables()
+
+    assert codex == (
+        Path.home() / ".npm-global/lib/node_modules/@openai/codex/bin/codex.js"
+    )
+    assert claude == (
+        Path.home() / ".local/share/claude/versions" / SUPPORTED_CLAUDE_VERSION
+    )
+
+
+def test_host_preflight_uses_reviewed_installs_during_live_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_LOOP_ALLOW_LIVE", "1")
+    selected = {
+        "codex": SimpleNamespace(host_executable=tmp_path / "reviewed-codex"),
+        "claude": SimpleNamespace(host_executable=tmp_path / "reviewed-claude"),
+    }
+    observed: list[str] = []
+
+    def required(tool: str) -> SimpleNamespace:
+        observed.append(tool)
+        return selected[tool]
+
+    monkeypatch.setattr(live_support, "required_install", required)
+
+    assert live_support.selected_host_preflight_executables() == (
+        selected["codex"].host_executable,
+        selected["claude"].host_executable,
+    )
+    assert observed == ["codex", "claude"]
 
 
 def test_live_installs_use_the_same_production_mount_boundaries(

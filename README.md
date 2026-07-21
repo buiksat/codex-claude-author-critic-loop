@@ -9,10 +9,12 @@ The version-1 implementation paths, portable control plane, executable fake-agen
 target-host containment components have broad automated coverage. Qualification is nevertheless
 incomplete: the required Ruff/strict-mypy gates were unavailable, and several pinned-CLI behavioral
 clauses remain unproved. The managed Claude system boundary is installed and passed its no-network
-initialization probe, but credentialed first-turn/resume/model smoke tests were not run, so no live
-capability receipt exists and the runtime remains intentionally blocked. No paid model call is
-required by installation or the normal test suite. Do not treat the package as a production
-security boundary; see
+initialization probe. One explicitly authorized qualification was attempted but failed before the
+Codex resume: the documented Codex model selector was invalid and the dedicated Claude token was
+rejected with HTTP 401. Those code/documentation issues are corrected, but the token still needs
+rotation and the live gates still need a fresh authorization, so no capability receipt exists and
+the runtime remains intentionally blocked. No paid model call is required by installation or the
+normal test suite. Do not treat the package as a production security boundary; see
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for current evidence.
 
 ## Frozen support matrix
@@ -88,8 +90,10 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/agent-loop/credentials/
 Create every credential directory with mode `0700` and every credential file with mode `0600`.
 Provision Codex with an explicitly selected and validated file-auth `auth.json`; never point the
 runner at an ambient Codex home. Generate a dedicated Claude automation token with
-`claude setup-token`, then place only that token in `oauth-token`. Avoid putting either secret on a
-command line, in shell history, in project configuration, or in retained artifacts.
+the exact reviewed executable (for the detected install,
+`/home/bahram/.local/share/claude/versions/2.1.215 setup-token`), then place only that token in
+`oauth-token`. Avoid putting either secret on a command line, in shell history, in project
+configuration, or in retained artifacts.
 
 One possible offline placement pattern is:
 
@@ -152,7 +156,7 @@ agent-loop --state-home /home/bahram/.local/state run \
   --codex-executable \
     /home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js \
   --claude-executable /home/bahram/.local/share/claude/versions/2.1.215 \
-  --author-model gpt-5.4-codex \
+  --author-model gpt-5.4 \
   --author-effort high \
   --critic-model claude-opus-4-6 \
   --critic-effort medium \
@@ -187,7 +191,7 @@ opaque_nonsemantic_paths = []
 review_context_paths = ["pyproject.toml"]
 read_only_toolchain_mounts = []
 
-author_model = "gpt-5.4-codex"
+author_model = "gpt-5.4"
 author_effort = "high"
 critic_model = "claude-opus-4-6"
 critic_effort = "medium"
@@ -251,7 +255,7 @@ export AGENT_LOOP_CODEX_CREDENTIAL_ID=author-account
 export AGENT_LOOP_CODEX_INSTALL_ROOT=/home/bahram/.npm-global/lib/node_modules/@openai/codex
 export AGENT_LOOP_CODEX_INSTALL_RELATIVE=bin/codex.js
 export AGENT_LOOP_CODEX_PATH=/home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js
-export AGENT_LOOP_CODEX_MODEL=gpt-5.4-codex
+export AGENT_LOOP_CODEX_MODEL=gpt-5.4
 export AGENT_LOOP_CODEX_EFFORT=high
 
 export AGENT_LOOP_CLAUDE_CREDENTIAL_ID=critic-token
@@ -291,10 +295,10 @@ current preflight; any mismatch, stale timestamp, unsafe metadata, or absent rec
 spending. Version-1 receipts are neither accepted nor migrated: changing to this boundary requires a
 new successful combined live session to mint `live-v2.json`.
 
-No paid or live model call was run while implementing or documenting this revision, so this work did
-not mint a receipt. Do not set the live gates until all portable, fake-agent, and target-host tests
-pass and the operator has explicitly authorized the exact accounts, models, timeouts, and calls. A
-skipped or xfailed test is not a successful smoke test.
+The failed qualification described above did not mint a receipt. Installation, documentation, and
+the normal test suite do not run model calls. Do not set the live gates until all portable,
+fake-agent, and target-host tests pass and the operator has explicitly authorized the exact
+accounts, models, timeouts, and calls. A skipped or xfailed test is not a successful smoke test.
 
 ## Default limits
 
@@ -389,11 +393,12 @@ python3.14 -m pytest -q -m 'not real_cli'
 python3.14 -m compileall -q src tests
 ```
 
-At this revision, pytest collected 617 tests; 590 portable tests and 22 host-marked tests passed,
-and the combined non-real-CLI selection passed 612 tests. That selection excludes all five
+At this revision, pytest collected 629 tests; 602 portable tests and 22 host-marked tests passed,
+and the combined non-real-CLI selection passed 624 tests. That selection excludes all five
 `real_cli`-marked nodes. Two non-model Codex probes and one pinned-Claude canonical-schema probe
-against a process-local fake endpoint were run separately and passed; the credentialed Codex and
-Claude model nodes were not run.
+against a process-local fake endpoint were run separately and passed. One credentialed Codex
+first-turn and one Claude critic call were attempted in a combined qualification and failed; the
+Codex resume was not reached and no receipt was written.
 
 Run target-host checks only on the frozen matrix:
 

@@ -25,7 +25,7 @@ from agent_loop.claude_managed_policy import (
     ManagedClaudeBoundary,
     inspect_managed_claude_boundary,
 )
-from agent_loop.constants import SUPPORTED_CODEX_VERSION
+from agent_loop.constants import SUPPORTED_CLAUDE_VERSION, SUPPORTED_CODEX_VERSION
 from agent_loop.preflight import run_preflight
 from agent_loop.provenance import (
     closure_sha256,
@@ -304,6 +304,21 @@ def inspect_live_install(tool: str) -> LiveInstall:
 
 def required_install(tool: str) -> LiveInstall:
     return _pytest_checked(lambda: inspect_live_install(tool))
+
+
+def selected_host_preflight_executables() -> tuple[Path, Path]:
+    """Select immutable defaults, or the reviewed installs during a live session."""
+
+    if os.environ.get("AGENT_LOOP_ALLOW_LIVE") == "1":
+        return (
+            required_install("codex").host_executable,
+            required_install("claude").host_executable,
+        )
+    home = Path.home()
+    return (
+        home / ".npm-global/lib/node_modules/@openai/codex/bin/codex.js",
+        home / ".local/share/claude/versions" / SUPPORTED_CLAUDE_VERSION,
+    )
 
 
 def _checked_managed_claude_selectors() -> tuple[str, str]:

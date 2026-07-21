@@ -378,7 +378,7 @@ def _production_environment() -> EnvironmentReport:
 def _production_configuration() -> RunConfiguration:
     return RunConfiguration(
         workflow.ProjectConfig(
-            author_model="gpt-5.4-codex",
+            author_model="gpt-5.4",
             author_effort="high",
             critic_model="claude-opus-4-6",
             critic_effort="medium",

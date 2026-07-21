@@ -337,6 +337,40 @@ def test_jsonl_parser_rejects_nested_duplicate_keys() -> None:
         parse_codex_jsonl(payload)
 
 
+@pytest.mark.parametrize(
+    "events",
+    (
+        (
+            {
+                "type": "thread.started",
+                "thread_id": "thread",
+                "model": "\ud800",
+            },
+        ),
+        (
+            {"type": "thread.started", "thread_id": "thread"},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "\ud800"},
+            },
+        ),
+    ),
+)
+def test_jsonl_parser_rejects_escaped_lone_surrogates_as_typed_protocol_failures(
+    events: tuple[dict[str, object], ...],
+) -> None:
+    payload = b"\n".join(
+        json.dumps(event, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        for event in events
+    )
+
+    with pytest.raises(AgentLoopError) as caught:
+        parse_codex_jsonl(payload)
+
+    assert caught.value.reason is StopReason.AUTHOR_PROCESS_FAILURE
+    assert "\\ud800" not in caught.value.detail
+
+
 def test_fake_first_and_exact_resume_round_trip(fake_codex: Path) -> None:
     client = CodexClient(local_transport)
 
@@ -438,6 +472,115 @@ def test_process_classification_checks_output_and_timeout_before_exit_code() -> 
     with pytest.raises(AgentLoopError) as caught:
         classify_codex_process_result(both)
     assert caught.value.reason is StopReason.AGENT_OUTPUT_LIMIT
+
+
+def test_nonzero_process_reports_only_strict_structural_failure_facts() -> None:
+    secret = "credential-and-model-content-must-not-cross"
+    stdout = b"\n".join(
+        (
+            b'{"type":"thread.started","thread_id":"thread-safe"}',
+            json.dumps(
+                {"type": "error", "message": secret}, separators=(",", ":")
+            ).encode(),
+            json.dumps(
+                {"type": "turn.failed", "error": {"message": secret}},
+                separators=(",", ":"),
+            ).encode(),
+        )
+    ) + b"\n"
+    result = BoundedProcessResult(
+        1,
+        stdout,
+        secret.encode(),
+        1.0,
+        2.0,
+        False,
+        False,
+    )
+
+    with pytest.raises(AgentLoopError) as caught:
+        classify_codex_process_result(result)
+
+    assert caught.value.reason is StopReason.AUTHOR_PROCESS_FAILURE
+    assert caught.value.detail == (
+        "Codex process exited unsuccessfully (1; stdout_protocol=valid; "
+        "thread_started=true; terminal_event=turn.failed; stderr_present=true)"
+    )
+    assert secret not in caught.value.detail
+
+
+@pytest.mark.parametrize(
+    ("stdout", "max_bytes", "expected_protocol"),
+    (
+        (b"{not-json\n", 1024, "invalid"),
+        (
+            b'{"type":"thread.started","thread_id":"thread-safe"}\n'
+            b'{"type":"turn.failed","error":{"message":"one","message":"two"}}\n',
+            1024,
+            "invalid",
+        ),
+        (
+            b'{"type":"thread.started","thread_id":"thread-safe"}\n'
+            b'{"type":"turn.failed","error":{"message":"\\ud800"}}\n',
+            1024,
+            "invalid",
+        ),
+        (
+            b'{"type":"thread.started","thread_id":"thread-safe"}\n'
+            b'{"type":"error","message":"private","unexpected":true}\n'
+            b'{"type":"turn.failed","error":{"message":"private"}}\n',
+            1024,
+            "invalid",
+        ),
+        (b"x" * 11, 10, "over_limit"),
+    ),
+)
+def test_nonzero_diagnostic_fails_closed_for_malformed_duplicate_or_oversized_jsonl(
+    stdout: bytes,
+    max_bytes: int,
+    expected_protocol: str,
+) -> None:
+    result = BoundedProcessResult(7, stdout, b"", 1.0, 2.0, False, False)
+
+    with pytest.raises(AgentLoopError) as caught:
+        classify_codex_process_result(result, max_bytes=max_bytes)
+
+    assert caught.value.reason is StopReason.AUTHOR_PROCESS_FAILURE
+    assert caught.value.detail == (
+        f"Codex process exited unsuccessfully (7; stdout_protocol={expected_protocol}; "
+        "thread_started=unverified; terminal_event=unverified; stderr_present=false)"
+    )
+    assert "one" not in caught.value.detail
+    assert "two" not in caught.value.detail
+
+
+@pytest.mark.parametrize(
+    ("last_event", "expected_terminal"),
+    (
+        ({"type": "error", "message": "private failure"}, "error"),
+        ({"type": "turn.started"}, "none"),
+    ),
+)
+def test_nonzero_diagnostic_classifies_only_exact_terminal_event_shape(
+    last_event: dict[str, object], expected_terminal: str
+) -> None:
+    stdout = b"\n".join(
+        (
+            b'{"type":"thread.started","thread_id":"thread-safe"}',
+            json.dumps(last_event, separators=(",", ":")).encode(),
+        )
+    ) + b"\n"
+    result = BoundedProcessResult(1, stdout, b"", 1.0, 2.0, False, False)
+
+    with pytest.raises(AgentLoopError) as caught:
+        classify_codex_process_result(result)
+
+    assert caught.value.detail == (
+        "Codex process exited unsuccessfully (1; stdout_protocol=valid; "
+        f"thread_started=true; terminal_event={expected_terminal}; "
+        "stderr_present=false)"
+    )
+    assert "private failure" not in caught.value.detail
 
 
 def test_parser_enforces_its_own_byte_bound() -> None:

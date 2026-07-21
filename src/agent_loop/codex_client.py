@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from .constants import DEFAULT_MAX_AGENT_OUTPUT_BYTES, DEFAULT_MAX_FIELD_BYTES, PRIVATE_FILE_MODE
 from .credentials import CodexCredentialTransaction
-from .errors import StopReason, fail
+from .errors import AgentLoopError, StopReason, fail
 from .filesystem import ConfinedFilesystem
 from .models import path_matches_pattern
 from .service import BoundedProcessResult
@@ -529,7 +529,11 @@ def _bounded_fact(value: object, *, name: str) -> str | None:
         return None
     if not isinstance(value, str) or not value or "\x00" in value:
         raise _invalid_protocol(f"Codex {name} metadata is invalid")
-    if len(value.encode("utf-8")) > 256:
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise _invalid_protocol(f"Codex {name} metadata is invalid") from None
+    if len(encoded) > 256:
         raise _invalid_protocol(f"Codex {name} metadata exceeds its bound")
     return value
 
@@ -644,7 +648,11 @@ def parse_codex_jsonl(
                 text = item.get("text")
                 if not isinstance(text, str) or "\x00" in text:
                     raise _invalid_protocol("Codex agent message is invalid")
-                if len(text.encode("utf-8")) > DEFAULT_MAX_FIELD_BYTES:
+                try:
+                    encoded_text = text.encode("utf-8", errors="strict")
+                except UnicodeEncodeError:
+                    raise _invalid_protocol("Codex agent message is invalid") from None
+                if len(encoded_text) > DEFAULT_MAX_FIELD_BYTES:
                     raise _invalid_protocol("Codex final message exceeds max_field_bytes")
                 final_message = text
         elif event_type == "turn.completed":
@@ -687,6 +695,108 @@ def parse_codex_jsonl(
     )
 
 
+def _nonzero_codex_jsonl_facts(
+    data: bytes,
+    *,
+    expected_thread_id: str | None,
+    max_bytes: int,
+) -> tuple[str, str, str]:
+    """Return content-free structural facts for one unsuccessful CLI result.
+
+    Codex failure messages and stderr are untrusted model/control output and can
+    contain prompts, source text, or credential material.  This parser therefore
+    validates the bounded JSONL structure but releases only fixed enum/boolean
+    facts.  Any ambiguity makes the partially observed event chain unverified.
+    """
+
+    if not isinstance(data, bytes):
+        raise TypeError("Codex JSONL must be bytes")
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    if expected_thread_id is not None:
+        _validate_thread_id(expected_thread_id)
+    if len(data) > max_bytes:
+        return "over_limit", "unverified", "unverified"
+    if not data:
+        return "empty", "false", "none"
+
+    raw_lines = data.split(b"\n")
+    if raw_lines and raw_lines[-1] == b"":
+        raw_lines.pop()
+    if not raw_lines or len(raw_lines) > _MAX_JSONL_EVENTS:
+        return "invalid", "unverified", "unverified"
+
+    lines: list[bytes] = []
+    for raw_line in raw_lines:
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+        if not raw_line or b"\r" in raw_line or len(raw_line) > _MAX_JSONL_LINE_BYTES:
+            return "invalid", "unverified", "unverified"
+        lines.append(raw_line)
+
+    events: list[dict[str, object]] = []
+    try:
+        for line in lines:
+            event = _parse_json_object(line)
+            event_type = event.get("type")
+            if not isinstance(event_type, str) or not event_type:
+                return "invalid", "unverified", "unverified"
+            events.append(event)
+    except AgentLoopError:
+        # _parse_json_object uses fixed diagnostics and never interpolates the
+        # malformed line.  Do not forward even that internal parser exception.
+        return "invalid", "unverified", "unverified"
+
+    if events[0].get("type") != "thread.started":
+        return "invalid", "false", "unverified"
+    started_events = tuple(event for event in events if event.get("type") == "thread.started")
+    if len(started_events) != 1:
+        return "invalid", "unverified", "unverified"
+    thread_id = started_events[0].get("thread_id")
+    if not isinstance(thread_id, str) or _THREAD_ID.fullmatch(thread_id) is None:
+        return "invalid", "unverified", "unverified"
+    if expected_thread_id is not None and thread_id != expected_thread_id:
+        return "invalid", "unverified", "unverified"
+
+    def valid_failure_message(value: object) -> bool:
+        if not isinstance(value, str) or "\x00" in value:
+            return False
+        try:
+            encoded = value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return False
+        return len(encoded) <= DEFAULT_MAX_FIELD_BYTES
+
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "turn.failed":
+            error = event.get("error")
+            if set(event) != {"type", "error"} or not isinstance(error, dict):
+                return "invalid", "unverified", "unverified"
+            if set(error) != {"message"} or not valid_failure_message(
+                error.get("message")
+            ):
+                return "invalid", "unverified", "unverified"
+        elif event_type == "error":
+            if set(event) != {"type", "message"} or not valid_failure_message(
+                event.get("message")
+            ):
+                return "invalid", "unverified", "unverified"
+
+    terminal_event = "none"
+    last = events[-1]
+    last_type = last.get("type")
+    failed_count = sum(event.get("type") == "turn.failed" for event in events)
+    if failed_count and (failed_count != 1 or last_type != "turn.failed"):
+        return "invalid", "unverified", "unverified"
+    if last_type == "turn.failed":
+        terminal_event = "turn.failed"
+    elif last_type == "error":
+        terminal_event = "error"
+
+    return "valid", "true", terminal_event
+
+
 def classify_codex_process_result(
     result: BoundedProcessResult,
     *,
@@ -700,9 +810,17 @@ def classify_codex_process_result(
     if result.timed_out:
         raise fail(StopReason.AUTHOR_TIMEOUT, "Codex exceeded the outer author timeout")
     if result.returncode != 0:
+        stdout_protocol, thread_started, terminal_event = _nonzero_codex_jsonl_facts(
+            result.stdout,
+            expected_thread_id=expected_thread_id,
+            max_bytes=max_bytes,
+        )
         raise fail(
             StopReason.AUTHOR_PROCESS_FAILURE,
-            f"Codex process exited unsuccessfully ({result.returncode})",
+            "Codex process exited unsuccessfully "
+            f"({result.returncode}; stdout_protocol={stdout_protocol}; "
+            f"thread_started={thread_started}; terminal_event={terminal_event}; "
+            f"stderr_present={'true' if result.stderr else 'false'})",
         )
     return parse_codex_jsonl(
         result.stdout,

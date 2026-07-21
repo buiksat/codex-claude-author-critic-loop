@@ -52,7 +52,7 @@ def _binding() -> LiveCapabilityBinding:
             executable_sha256="b" * 64,
             install_closure_sha256="c" * 64,
             credential_id="codex-account",
-            requested_model="gpt-5.4-codex",
+            requested_model="gpt-5.4",
             requested_effort="high",
         ),
         claude=ToolCapabilityBinding(
@@ -460,7 +460,7 @@ def test_environment_report_constructor_requires_managed_claude_boundary() -> No
             object(),  # type: ignore[arg-type]
             codex_credential_id="codex-account",
             claude_credential_id="claude-account",
-            author_model="gpt-5.4-codex",
+            author_model="gpt-5.4",
             author_effort="high",
             critic_model="claude-opus-4-6",
             critic_effort="medium",
