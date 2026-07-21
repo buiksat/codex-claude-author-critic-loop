@@ -805,7 +805,9 @@ def classify_codex_process_result(
 ) -> CodexTurnResult:
     if not isinstance(result, BoundedProcessResult):
         raise TypeError("result must be a BoundedProcessResult")
-    if result.output_limited:
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    if result.output_limited or len(result.stdout) + len(result.stderr) > max_bytes:
         raise fail(StopReason.AGENT_OUTPUT_LIMIT, "Codex output exceeded its byte limit")
     if result.timed_out:
         raise fail(StopReason.AUTHOR_TIMEOUT, "Codex exceeded the outer author timeout")

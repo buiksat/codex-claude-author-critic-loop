@@ -474,6 +474,13 @@ def test_process_classification_checks_output_and_timeout_before_exit_code() -> 
     assert caught.value.reason is StopReason.AGENT_OUTPUT_LIMIT
 
 
+def test_unflagged_oversized_nonzero_result_is_still_an_output_limit() -> None:
+    oversized = BoundedProcessResult(9, b"123456", b"12345", 1.0, 2.0, False, False)
+    with pytest.raises(AgentLoopError) as unflagged:
+        classify_codex_process_result(oversized, max_bytes=10)
+    assert unflagged.value.reason is StopReason.AGENT_OUTPUT_LIMIT
+
+
 def test_nonzero_process_reports_only_strict_structural_failure_facts() -> None:
     secret = "credential-and-model-content-must-not-cross"
     stdout = b"\n".join(
@@ -532,10 +539,9 @@ def test_nonzero_process_reports_only_strict_structural_failure_facts() -> None:
             1024,
             "invalid",
         ),
-        (b"x" * 11, 10, "over_limit"),
     ),
 )
-def test_nonzero_diagnostic_fails_closed_for_malformed_duplicate_or_oversized_jsonl(
+def test_nonzero_diagnostic_fails_closed_for_malformed_or_duplicate_jsonl(
     stdout: bytes,
     max_bytes: int,
     expected_protocol: str,

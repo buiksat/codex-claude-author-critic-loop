@@ -26,7 +26,7 @@ passed contracts.
 | Bash | 5.3.x | 5.3.x | compatible |
 | Bubblewrap | upstream 0.11.1; package `0.11.1-1ubuntu0.1`; `/usr/bin/bwrap`, root:root, mode `0755`, SHA-256 `0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0` | exact patched non-setuid build | compatible; provenance and negative probes passed |
 | systemd user manager | systemd 259; user manager running | transient user services on 259 | compatible; lifecycle/resource probes passed |
-| Codex CLI | 0.144.6 | 0.144.6 | version/help and non-model prompt-input probes passed; a paid first-turn attempt failed after `thread.started` while using the invalid documented `gpt-5.4-codex` selector, making that catalog mismatch the strongest diagnosis; the selector is now bundled `gpt-5.4`, while exact resume remains blocked |
+| Codex CLI | 0.144.6 | 0.144.6 | version/help and non-model prompt-input probes passed; a paid first-turn attempt failed after `thread.started` while using documented selector `gpt-5.4-codex`, which was absent from both the pinned bundled catalog and the failed transaction's cached catalog; that mismatch is the strongest diagnosis, not a retained raw-error proof; the selector is now bundled `gpt-5.4`, while exact resume remains blocked |
 | Claude Code | 2.1.215 | 2.1.215 | executable and canonical-schema handoff passed a non-model local-endpoint probe; the managed paid critic attempt reached the API but its dedicated token received HTTP 401 and must be rotated |
 | Namespace/runtime | user/PID/IPC/UTS/network namespaces, full tmpfs, PID 1 supervisor | required | target-host suite passed |
 

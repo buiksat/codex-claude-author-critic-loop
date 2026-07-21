@@ -10,11 +10,13 @@ target-host containment components have broad automated coverage. Qualification 
 incomplete: the required Ruff/strict-mypy gates were unavailable, and several pinned-CLI behavioral
 clauses remain unproved. The managed Claude system boundary is installed and passed its no-network
 initialization probe. One explicitly authorized qualification was attempted but failed before the
-Codex resume: the documented Codex model selector was invalid and the dedicated Claude token was
-rejected with HTTP 401. Those code/documentation issues are corrected, but the token still needs
-rotation and the live gates still need a fresh authorization, so no capability receipt exists and
-the runtime remains intentionally blocked. No paid model call is required by installation or the
-normal test suite. Do not treat the package as a production security boundary; see
+Codex resume: the documented Codex selector was absent from the pinned CLI's bundled and cached
+model catalogs, making it the strongest diagnosis for that otherwise opaque failure, while the
+dedicated Claude token was rejected with HTTP 401. The selector is corrected, but the token still
+needs rotation and the live gates still need a fresh authorization, so no capability receipt
+exists and the runtime remains intentionally blocked. No paid model call is required by
+installation or the normal test suite. Do not treat the package as a production security boundary;
+see
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for current evidence.
 
 ## Frozen support matrix
