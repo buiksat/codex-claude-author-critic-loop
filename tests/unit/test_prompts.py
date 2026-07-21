@@ -7,7 +7,7 @@ from agent_loop.declassify import ValidationCriticEvidence
 from agent_loop.errors import AgentLoopError, StopReason
 from agent_loop.manifests import SubjectManifest, diff_manifests
 from agent_loop.models import ManifestEntry
-from agent_loop.prompts import FindingLedgerItem, build_review_bundle
+from agent_loop.prompts import CRITIC_PROMPT, FindingLedgerItem, build_review_bundle
 
 
 class Blobs:
@@ -25,6 +25,22 @@ def entry(path: bytes, data: bytes) -> tuple[ManifestEntry, dict[str, bytes]]:
 
 def evidence(fingerprint: str) -> ValidationCriticEvidence:
     return ValidationCriticEvidence(1, fingerprint, True, ())
+
+
+def test_critic_prompt_states_exact_verdict_field_invariants() -> None:
+    assert "LGTM: blocked_reason must be JSON null and blocking_findings must be []" in (
+        CRITIC_PROMPT
+    )
+    assert (
+        "REVISE: blocked_reason must be JSON null and blocking_findings must be non-empty"
+        in CRITIC_PROMPT
+    )
+    assert (
+        "BLOCKED: blocked_reason must be a non-empty, non-whitespace string "
+        "and\n  blocking_findings must be []"
+        in CRITIC_PROMPT
+    )
+    assert 'Never substitute a phrase such as "none" for JSON null.' in CRITIC_PROMPT
 
 
 def test_053_bundle_budgets() -> None:

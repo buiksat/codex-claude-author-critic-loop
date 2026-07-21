@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft7Validator
 
 from agent_loop.claude_client import (
     ClaudeClient,
@@ -20,7 +21,6 @@ from agent_loop.schemas import (
     ApprovalContext,
     Verdict,
     critic_schema_document,
-    parse_critic_envelope,
 )
 from agent_loop.service import BoundedProcessResult, run_bounded_process
 
@@ -158,16 +158,15 @@ def test_051_retry_budget_is_exact_and_watchdog_absent() -> None:
 def test_051_one_internal_schema_retry_is_bounded_and_never_becomes_an_outer_loop(
     second_attempt_valid: bool,
 ) -> None:
-    approval = ApprovalContext(True, True, True)
-    invalid = process(
-        {
-            "type": "result",
-            "structured_output": {"schema_version": 1, "verdict": "LGTM"},
-        }
-    )
+    invalid_payload = lgtm()
+    invalid_review = invalid_payload["structured_output"]
+    assert isinstance(invalid_review, dict)
+    invalid_review["blocked_reason"] = "No blocking issues."
+    invalid = process(invalid_payload)
     candidates = (invalid, process(lgtm()) if second_attempt_valid else invalid, process(lgtm()))
     transport_calls = 0
     schema_attempts = 0
+    schema_validator = Draft7Validator(critic_schema_document())
 
     def transport(
         invocation: ClaudeInvocation,
@@ -179,10 +178,9 @@ def test_051_one_internal_schema_retry_is_bounded_and_never_becomes_an_outer_loo
         retry_budget = int(invocation.launch_environment()["MAX_STRUCTURED_OUTPUT_RETRIES"])
         for attempt_index, candidate in enumerate(candidates):
             schema_attempts += 1
-            try:
-                parse_critic_envelope(candidate.stdout, approval=approval)
-            except AgentLoopError as exc:
-                assert exc.reason is StopReason.INVALID_STRUCTURED_OUTPUT
+            candidate_envelope = json.loads(candidate.stdout)
+            candidate_review = candidate_envelope.get("structured_output")
+            if not schema_validator.is_valid(candidate_review):
                 if attempt_index == retry_budget:
                     return process(
                         {
@@ -197,11 +195,21 @@ def test_051_one_internal_schema_retry_is_bounded_and_never_becomes_an_outer_loo
 
     client = ClaudeClient(transport)
     if second_attempt_valid:
-        result = client.review(bundle(), env(), approval=approval, timeout_seconds=301)
+        result = client.review(
+            bundle(),
+            env(),
+            approval=ApprovalContext(True, True, True),
+            timeout_seconds=301,
+        )
         assert result.review.verdict is Verdict.LGTM
     else:
         with pytest.raises(AgentLoopError) as caught:
-            client.review(bundle(), env(), approval=approval, timeout_seconds=301)
+            client.review(
+                bundle(),
+                env(),
+                approval=ApprovalContext(True, True, True),
+                timeout_seconds=301,
+            )
         assert caught.value.reason is StopReason.STRUCTURED_OUTPUT_RETRIES
 
     assert schema_attempts == 2

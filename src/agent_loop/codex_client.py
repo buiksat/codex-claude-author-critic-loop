@@ -7,19 +7,26 @@ author sandbox/service transport.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import stat
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
-from .constants import DEFAULT_MAX_AGENT_OUTPUT_BYTES, DEFAULT_MAX_FIELD_BYTES, PRIVATE_FILE_MODE
+from .constants import (
+    DEFAULT_MAX_AGENT_OUTPUT_BYTES,
+    DEFAULT_MAX_FIELD_BYTES,
+    PRIVATE_FILE_MODE,
+    SUPPORTED_CODEX_VERSION,
+)
 from .credentials import CodexCredentialTransaction
 from .errors import AgentLoopError, StopReason, fail
-from .filesystem import ConfinedFilesystem
+from .filesystem import ConfinedFilesystem, open_beneath
 from .models import path_matches_pattern
 from .service import BoundedProcessResult
 
@@ -35,6 +42,65 @@ _EFFORT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _THREAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$")
 _MAX_JSONL_EVENTS = 100_000
 _MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024
+_MAX_ROLLOUT_BYTES = 64 * 1024 * 1024
+_MAX_ROLLOUT_EVENTS = 200_000
+_MAX_ROLLOUT_LINE_BYTES = DEFAULT_MAX_AGENT_OUTPUT_BYTES
+_MAX_ROLLOUT_NAMESPACE_ENTRIES = 256
+_UUID = re.compile(
+    rb"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_ROLLOUT_FILE = re.compile(
+    rb"^rollout-(\d{4})-(\d{2})-(\d{2})T"
+    rb"(?:[01]\d|2[0-3])-[0-5]\d-[0-5]\d-"
+    rb"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    rb"\.jsonl$"
+)
+_ROLLOUT_COMPRESSED_FILE = re.compile(
+    rb"^rollout-(\d{4})-(\d{2})-(\d{2})T"
+    rb"(?:[01]\d|2[0-3])-[0-5]\d-[0-5]\d-"
+    rb"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    rb"\.jsonl\.zst$"
+)
+_MODEL_REROUTE_PREFIX = "model rerouted: "
+_ROLLOUT_ITEM_TYPES = frozenset(
+    {
+        "session_meta",
+        "response_item",
+        "inter_agent_communication",
+        "inter_agent_communication_metadata",
+        "compacted",
+        "turn_context",
+        "world_state",
+        "event_msg",
+    }
+)
+# Exact union admitted by the pinned rollout persistence policy across legacy
+# and paginated history.  Deserialization aliases and transient events are not
+# honest durable wire shapes.
+_ROLLOUT_EVENT_TYPES = frozenset(
+    {
+        "item_completed",
+        "token_count",
+        "thread_goal_updated",
+        "thread_rolled_back",
+        "turn_aborted",
+        "task_started",
+        "task_complete",
+        "thread_settings_applied",
+        "user_message",
+        "agent_message",
+        "agent_reasoning",
+        "agent_reasoning_raw_content",
+        "entered_review_mode",
+        "exited_review_mode",
+        "patch_apply_end",
+        "context_compacted",
+        "mcp_tool_call_end",
+        "web_search_end",
+        "image_generation_end",
+        "sub_agent_activity",
+    }
+)
 _FIXED_WORKSPACE_DENIES = (
     ".git",
     ".git/**",
@@ -494,6 +560,35 @@ class CodexTurnResult:
     completed_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class CodexRolloutPrefixWitness:
+    """Content-free digest of one fully accepted append-only rollout prefix."""
+
+    byte_length: int
+    sha256: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.byte_length, int)
+            or isinstance(self.byte_length, bool)
+            or self.byte_length <= 0
+            or not isinstance(self.sha256, bytes)
+            or len(self.sha256) != hashlib.sha256().digest_size
+        ):
+            raise ValueError("Codex rollout prefix witness is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CodexSelectionEvidence:
+    """Resolved client-side selection from one persisted Codex turn."""
+
+    turn_id: str
+    model: str
+    effort: str
+    turn_ids: tuple[str, ...]
+    rollout_prefix: CodexRolloutPrefixWitness
+
+
 def _invalid_protocol(detail: str) -> Exception:
     return fail(StopReason.AUTHOR_PROCESS_FAILURE, detail)
 
@@ -544,6 +639,96 @@ def _coalesce_fact(current: str | None, observed: str | None, *, name: str) -> s
     if current is not None and current != observed:
         raise _invalid_protocol(f"Codex reported contradictory {name} metadata")
     return observed
+
+
+def _canonical_rollout_turn_id(value: object) -> str:
+    try:
+        encoded = value.encode("ascii", errors="strict") if isinstance(value, str) else b""
+    except UnicodeEncodeError:
+        raise _invalid_protocol("Codex rollout lifecycle metadata is invalid") from None
+    if not isinstance(value, str) or _UUID.fullmatch(encoded) is None:
+        raise _invalid_protocol("Codex rollout lifecycle metadata is invalid")
+    return value
+
+
+def _nonnegative_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _nonnegative_integer_or_none(value: object) -> bool:
+    return value is None or _nonnegative_integer(value)
+
+
+def _bounded_rollout_text(value: object, *, maximum: int, allow_empty: bool) -> bool:
+    if not isinstance(value, str) or "\x00" in value or (not allow_empty and not value):
+        return False
+    try:
+        return len(value.encode("utf-8", errors="strict")) <= maximum
+    except UnicodeEncodeError:
+        return False
+
+
+def _rollout_lifecycle_turn_id(
+    payload: dict[str, object],
+    *,
+    completed: bool,
+) -> str:
+    if completed:
+        required = {"type", "turn_id", "last_agent_message"}
+        allowed = {
+            *required,
+            "completed_at",
+            "duration_ms",
+            "time_to_first_token_ms",
+        }
+        last_message = payload.get("last_agent_message")
+        if (
+            not required.issubset(payload)
+            or not set(payload).issubset(allowed)
+            or (
+                last_message is not None
+                and not _bounded_rollout_text(
+                    last_message,
+                    maximum=DEFAULT_MAX_FIELD_BYTES,
+                    allow_empty=True,
+                )
+            )
+            or any(
+                not _nonnegative_integer(payload.get(name))
+                for name in ("completed_at", "duration_ms", "time_to_first_token_ms")
+                if name in payload
+            )
+        ):
+            raise _invalid_protocol("Codex rollout lifecycle metadata is invalid")
+    else:
+        required = {
+            "type",
+            "turn_id",
+            "model_context_window",
+            "collaboration_mode_kind",
+        }
+        allowed = {*required, "trace_id", "started_at"}
+        trace_id = payload.get("trace_id")
+        if (
+            not required.issubset(payload)
+            or not set(payload).issubset(allowed)
+            or (
+                "trace_id" in payload
+                and not _bounded_rollout_text(
+                    trace_id,
+                    maximum=256,
+                    allow_empty=False,
+                )
+            )
+            or (
+                "started_at" in payload
+                and not _nonnegative_integer(payload.get("started_at"))
+            )
+            or not _nonnegative_integer_or_none(payload.get("model_context_window"))
+            or payload.get("collaboration_mode_kind") not in {"default", "plan"}
+        ):
+            raise _invalid_protocol("Codex rollout lifecycle metadata is invalid")
+    return _canonical_rollout_turn_id(payload.get("turn_id"))
 
 
 def _usage(value: object) -> CodexUsage:
@@ -644,6 +829,14 @@ def parse_codex_jsonl(
             item = event.get("item")
             if not isinstance(item, dict):
                 raise _invalid_protocol("Codex item.completed event has no item object")
+            if (
+                item.get("type") == "error"
+                and isinstance(item.get("message"), str)
+                and item["message"].startswith(_MODEL_REROUTE_PREFIX)
+            ):
+                # Pinned exec independently converts ModelReroute into this
+                # typed error item.  Reject it even before rollout attachment.
+                raise _invalid_protocol("Codex server rerouted the requested model")
             if item.get("type") == "agent_message":
                 text = item.get("text")
                 if not isinstance(text, str) or "\x00" in text:
@@ -692,6 +885,521 @@ def parse_codex_jsonl(
         observed_effort=observed_effort,
         event_json=tuple(event_json),
         completed_at=completed_at,
+    )
+
+
+def parse_codex_rollout_selection(
+    data: bytes,
+    *,
+    expected_thread_id: str,
+    expected_previous_turn_ids: tuple[str, ...] | None = None,
+    expected_prefix_witness: CodexRolloutPrefixWitness | None = None,
+    max_bytes: int = _MAX_ROLLOUT_BYTES,
+    max_events: int = _MAX_ROLLOUT_EVENTS,
+    max_line_bytes: int = _MAX_ROLLOUT_LINE_BYTES,
+) -> CodexSelectionEvidence:
+    """Extract resolved per-turn request-selection facts from a pinned rollout."""
+
+    if not isinstance(data, bytes):
+        raise TypeError("Codex rollout JSONL must be bytes")
+    _validate_thread_id(expected_thread_id)
+    if (expected_previous_turn_ids is None) != (expected_prefix_witness is None):
+        raise ValueError("Codex resume requires history and prefix witnesses together")
+    if expected_prefix_witness is not None and not isinstance(
+        expected_prefix_witness, CodexRolloutPrefixWitness
+    ):
+        raise TypeError("expected_prefix_witness must be a CodexRolloutPrefixWitness")
+    if expected_previous_turn_ids is not None:
+        if (
+            not isinstance(expected_previous_turn_ids, tuple)
+            or not expected_previous_turn_ids
+            or any(
+                not isinstance(turn_id, str)
+                for turn_id in expected_previous_turn_ids
+            )
+            or len(expected_previous_turn_ids) != len(set(expected_previous_turn_ids))
+        ):
+            raise ValueError("expected previous Codex turn IDs are invalid")
+        for turn_id in expected_previous_turn_ids:
+            try:
+                encoded_turn_id = turn_id.encode("ascii", errors="strict")
+            except (AttributeError, UnicodeEncodeError):
+                raise ValueError("expected previous Codex turn IDs are invalid") from None
+            if _UUID.fullmatch(encoded_turn_id) is None:
+                raise ValueError("expected previous Codex turn IDs are invalid")
+    for name, value in (
+        ("max_bytes", max_bytes),
+        ("max_events", max_events),
+        ("max_line_bytes", max_line_bytes),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if len(data) > max_bytes:
+        raise fail(StopReason.AGENT_OUTPUT_LIMIT, "Codex rollout exceeded its byte limit")
+    if not data.endswith(b"\n"):
+        raise _invalid_protocol("Codex rollout does not end at a durable line boundary")
+    if expected_prefix_witness is not None:
+        prefix_length = expected_prefix_witness.byte_length
+        if (
+            len(data) <= prefix_length
+            or data[prefix_length - 1 : prefix_length] != b"\n"
+            or hashlib.sha256(data[:prefix_length]).digest()
+            != expected_prefix_witness.sha256
+        ):
+            raise _invalid_protocol("Codex rollout did not preserve its accepted byte prefix")
+
+    raw_lines = data.split(b"\n")
+    raw_lines.pop()
+    if not raw_lines or len(raw_lines) > max_events:
+        raise _invalid_protocol("Codex rollout has an invalid event count")
+
+    selections: dict[str, tuple[str, str]] = {}
+    distinct_turn_ids: list[str] = []
+    completed_turn_ids: list[str] = []
+    started_turn_ids: set[str] = set()
+    active_turn_id: str | None = None
+    active_context_count = 0
+    session_meta_count = 0
+    for index, raw_line in enumerate(raw_lines):
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+        if b"\r" in raw_line:
+            raise _invalid_protocol("Codex rollout contains a non-canonical line ending")
+        if not raw_line or len(raw_line) > max_line_bytes:
+            raise _invalid_protocol("Codex rollout contains an empty or oversized event")
+        event = _parse_json_object(raw_line)
+        if set(event) != {"timestamp", "type", "payload"}:
+            raise _invalid_protocol("Codex rollout event has an invalid envelope")
+        timestamp = event.get("timestamp")
+        event_type = event.get("type")
+        payload = event.get("payload")
+        try:
+            encoded_timestamp = (
+                timestamp.encode("utf-8", errors="strict")
+                if isinstance(timestamp, str)
+                else b""
+            )
+        except UnicodeEncodeError:
+            raise _invalid_protocol("Codex rollout event metadata is invalid") from None
+        if (
+            not isinstance(timestamp, str)
+            or not timestamp
+            or "\x00" in timestamp
+            or len(encoded_timestamp) > 128
+            or not isinstance(event_type, str)
+            or not event_type
+            or not isinstance(payload, dict)
+        ):
+            raise _invalid_protocol("Codex rollout event metadata is invalid")
+        if event_type not in _ROLLOUT_ITEM_TYPES:
+            raise _invalid_protocol("Codex rollout item type is unsupported")
+        if index == 0 and event_type != "session_meta":
+            raise _invalid_protocol("Codex rollout must start with session metadata")
+
+        if event_type == "session_meta":
+            session_meta_count += 1
+            if session_meta_count != 1 or index != 0:
+                raise _invalid_protocol("Codex rollout has ambiguous session metadata")
+            if (
+                payload.get("id") != expected_thread_id
+                or payload.get("session_id") != expected_thread_id
+                or payload.get("cli_version") != SUPPORTED_CODEX_VERSION
+            ):
+                raise _invalid_protocol("Codex rollout session metadata does not match the turn")
+            continue
+        if event_type == "event_msg":
+            nested_type = payload.get("type")
+            if not isinstance(nested_type, str) or nested_type not in _ROLLOUT_EVENT_TYPES:
+                raise _invalid_protocol("Codex rollout event type is unsupported")
+            if nested_type in {"turn_aborted", "thread_rolled_back"}:
+                raise _invalid_protocol("Codex rollout contains a rejected history transition")
+            if nested_type == "task_started":
+                turn_id = _rollout_lifecycle_turn_id(payload, completed=False)
+                if active_turn_id is not None or turn_id in started_turn_ids:
+                    raise _invalid_protocol("Codex rollout turn lifecycle is ambiguous")
+                active_turn_id = turn_id
+                active_context_count = 0
+                started_turn_ids.add(turn_id)
+            elif nested_type == "task_complete":
+                turn_id = _rollout_lifecycle_turn_id(payload, completed=True)
+                if active_turn_id != turn_id or active_context_count < 1:
+                    raise _invalid_protocol("Codex rollout turn lifecycle is incomplete")
+                completed_turn_ids.append(turn_id)
+                active_turn_id = None
+                active_context_count = 0
+            continue
+        if event_type != "turn_context":
+            continue
+
+        raw_turn_id = payload.get("turn_id")
+        raw_model = _bounded_fact(payload.get("model"), name="rollout model")
+        raw_effort = _bounded_fact(payload.get("effort"), name="rollout effort")
+        try:
+            encoded_turn_id = (
+                raw_turn_id.encode("ascii", errors="strict")
+                if isinstance(raw_turn_id, str)
+                else b""
+            )
+        except UnicodeEncodeError:
+            raise _invalid_protocol("Codex rollout selection metadata is invalid") from None
+        if (
+            not isinstance(raw_turn_id, str)
+            or _UUID.fullmatch(encoded_turn_id) is None
+            or raw_model is None
+            or _MODEL_ID.fullmatch(raw_model) is None
+            or raw_effort is None
+            or _EFFORT.fullmatch(raw_effort) is None
+        ):
+            raise _invalid_protocol("Codex rollout selection metadata is invalid")
+        if active_turn_id != raw_turn_id:
+            raise _invalid_protocol("Codex rollout selection is outside its turn lifecycle")
+        active_context_count += 1
+        selection = (raw_model, raw_effort)
+        prior = selections.get(raw_turn_id)
+        if prior is not None and prior != selection:
+            raise _invalid_protocol("Codex rollout contradicts selection metadata within a turn")
+        if distinct_turn_ids and distinct_turn_ids[-1] == raw_turn_id:
+            continue
+        if prior is not None:
+            raise _invalid_protocol("Codex rollout has non-contiguous turn selection metadata")
+        selections[raw_turn_id] = selection
+        distinct_turn_ids.append(raw_turn_id)
+
+    if session_meta_count != 1:
+        raise _invalid_protocol("Codex rollout omitted session metadata")
+    if active_turn_id is not None:
+        raise _invalid_protocol("Codex rollout ended inside an author turn")
+    if not distinct_turn_ids:
+        raise _invalid_protocol("Codex rollout omitted turn selection metadata")
+    turn_ids = tuple(distinct_turn_ids)
+    if turn_ids != tuple(completed_turn_ids):
+        raise _invalid_protocol("Codex rollout lifecycle does not bind its turn selections")
+    if expected_previous_turn_ids is None:
+        if len(turn_ids) != 1:
+            raise _invalid_protocol("Codex first-turn rollout has ambiguous turn history")
+    elif (
+        len(turn_ids) != len(expected_previous_turn_ids) + 1
+        or turn_ids[:-1] != expected_previous_turn_ids
+    ):
+        raise _invalid_protocol("Codex rollout did not advance by exactly one author turn")
+    latest_turn_id = turn_ids[-1]
+    latest_model, latest_effort = selections[latest_turn_id]
+    prefix = CodexRolloutPrefixWitness(
+        byte_length=len(data),
+        sha256=hashlib.sha256(data).digest(),
+    )
+    return CodexSelectionEvidence(
+        latest_turn_id,
+        latest_model,
+        latest_effort,
+        turn_ids,
+        prefix,
+    )
+
+
+def _same_rollout_metadata(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        first.st_dev == second.st_dev
+        and first.st_ino == second.st_ino
+        and first.st_mode == second.st_mode
+        and first.st_uid == second.st_uid
+        and first.st_gid == second.st_gid
+        and first.st_nlink == second.st_nlink
+        and first.st_size == second.st_size
+        and first.st_mtime_ns == second.st_mtime_ns
+        and first.st_ctime_ns == second.st_ctime_ns
+    )
+
+
+def _require_private_rollout_entry(info: os.stat_result, *, directory: bool) -> None:
+    expected_mode = 0o700 if directory else PRIVATE_FILE_MODE
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        not expected_type(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_gid != os.getegid()
+        or stat.S_IMODE(info.st_mode) != expected_mode
+        or (not directory and info.st_nlink != 1)
+    ):
+        raise _invalid_protocol("Codex rollout namespace contains an unsafe entry")
+
+
+def _require_private_rollout_directory(descriptor: int) -> os.stat_result:
+    try:
+        info = os.fstat(descriptor)
+        attributes = os.listxattr(descriptor)
+    except OSError:
+        raise _invalid_protocol("Codex rollout directory metadata is unverifiable") from None
+    _require_private_rollout_entry(info, directory=True)
+    if attributes:
+        raise _invalid_protocol("Codex rollout directory has unsupported metadata")
+    return info
+
+
+def _private_rollout_file(
+    parent_fd: int,
+    name: bytes,
+    before: os.stat_result,
+) -> tuple[int, os.stat_result]:
+    _require_private_rollout_entry(before, directory=False)
+    try:
+        descriptor = open_beneath(parent_fd, name, os.O_RDONLY)
+    except (AgentLoopError, OSError, TypeError, ValueError):
+        raise _invalid_protocol("Codex rollout file cannot be opened safely") from None
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_rollout_metadata(before, opened):
+            raise _invalid_protocol("Codex rollout file changed while opening")
+        try:
+            attributes = os.listxattr(descriptor)
+            after = os.fstat(descriptor)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            raise _invalid_protocol("Codex rollout file metadata is unverifiable") from None
+        if attributes or not (
+            _same_rollout_metadata(opened, after)
+            and _same_rollout_metadata(after, current)
+        ):
+            raise _invalid_protocol("Codex rollout file metadata is ambiguous")
+        return descriptor, after
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _walk_private_rollout_namespace(
+    descriptor: int,
+    *,
+    prefix: bytes,
+    depth: int,
+    encoded_thread_id: bytes,
+    entry_count: list[int],
+    candidates: list[tuple[int, os.stat_result]],
+) -> None:
+    opened_directory = _require_private_rollout_directory(descriptor)
+    try:
+        names = tuple(sorted(os.fsencode(name) for name in os.listdir(descriptor)))
+    except OSError:
+        raise _invalid_protocol("Codex rollout directory cannot be enumerated") from None
+    if len(names) != len(set(names)) or len(names) > _MAX_ROLLOUT_NAMESPACE_ENTRIES:
+        raise _invalid_protocol("Codex rollout directory metadata is ambiguous")
+
+    for name in names:
+        entry_count[0] += 1
+        if entry_count[0] > _MAX_ROLLOUT_NAMESPACE_ENTRIES:
+            raise _invalid_protocol("Codex rollout namespace exceeds its bound")
+        if not name or b"/" in name or b"\x00" in name:
+            raise _invalid_protocol("Codex rollout directory has an invalid entry name")
+        try:
+            before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        except OSError:
+            raise _invalid_protocol("Codex rollout entry cannot be inspected safely") from None
+        path = name if not prefix else prefix + b"/" + name
+
+        if depth < 3:
+            if (
+                (depth == 0 and re.fullmatch(rb"\d{4}", name) is None)
+                or (
+                    depth == 1
+                    and (
+                        re.fullmatch(rb"\d{2}", name) is None
+                        or not 1 <= int(name) <= 12
+                    )
+                )
+                or (
+                    depth == 2
+                    and (
+                        re.fullmatch(rb"\d{2}", name) is None
+                        or not 1 <= int(name) <= 31
+                    )
+                )
+            ):
+                raise _invalid_protocol("Codex rollout date directory is invalid")
+            _require_private_rollout_entry(before, directory=True)
+            try:
+                child_fd = open_beneath(
+                    descriptor,
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY,
+                )
+            except (AgentLoopError, OSError, TypeError, ValueError):
+                raise _invalid_protocol("Codex rollout directory cannot be opened safely") from None
+            try:
+                child_opened = os.fstat(child_fd)
+                if not _same_rollout_metadata(before, child_opened):
+                    raise _invalid_protocol("Codex rollout directory changed while opening")
+                _walk_private_rollout_namespace(
+                    child_fd,
+                    prefix=path,
+                    depth=depth + 1,
+                    encoded_thread_id=encoded_thread_id,
+                    entry_count=entry_count,
+                    candidates=candidates,
+                )
+                child_after = os.fstat(child_fd)
+                current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if not (
+                    _same_rollout_metadata(child_opened, child_after)
+                    and _same_rollout_metadata(child_after, current)
+                ):
+                    raise _invalid_protocol("Codex rollout directory changed during traversal")
+            except OSError:
+                raise _invalid_protocol("Codex rollout directory became unavailable") from None
+            finally:
+                os.close(child_fd)
+            continue
+
+        file_fd, file_info = _private_rollout_file(descriptor, name, before)
+        retain = False
+        try:
+            matched = _ROLLOUT_FILE.fullmatch(name)
+            compressed = _ROLLOUT_COMPRESSED_FILE.fullmatch(name)
+            shaped = matched if matched is not None else compressed
+            date_parts = prefix.split(b"/")
+            if (
+                shaped is None
+                or len(date_parts) != 3
+                or shaped.group(1) != date_parts[0]
+                or shaped.group(2) != date_parts[1]
+                or shaped.group(3) != date_parts[2]
+            ):
+                raise _invalid_protocol("Codex rollout filename is invalid")
+            if matched is not None and matched.group(4) == encoded_thread_id:
+                candidates.append((file_fd, file_info))
+                retain = True
+        finally:
+            if not retain:
+                os.close(file_fd)
+
+    try:
+        after_directory = os.fstat(descriptor)
+    except OSError:
+        raise _invalid_protocol("Codex rollout directory became unavailable") from None
+    if not _same_rollout_metadata(opened_directory, after_directory):
+        raise _invalid_protocol("Codex rollout directory changed during traversal")
+
+
+def _read_private_rollout_descriptor(
+    descriptor: int,
+    expected: os.stat_result,
+    *,
+    max_bytes: int,
+) -> bytes:
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    if expected.st_size > max_bytes:
+        raise fail(StopReason.AGENT_OUTPUT_LIMIT, "Codex rollout exceeded its byte limit")
+    chunks: list[bytes] = []
+    remaining = max_bytes + 1
+    try:
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(descriptor)
+    except OSError:
+        raise _invalid_protocol("Codex rollout could not be read safely") from None
+    if len(data) > max_bytes:
+        raise fail(StopReason.AGENT_OUTPUT_LIMIT, "Codex rollout exceeded its byte limit")
+    if not _same_rollout_metadata(expected, after) or len(data) != after.st_size:
+        raise _invalid_protocol("Codex rollout changed while reading")
+    return data
+
+
+def read_codex_rollout_selection(
+    codex_home: str | os.PathLike[str],
+    *,
+    expected_thread_id: str,
+    expected_previous_turn_ids: tuple[str, ...] | None = None,
+    expected_prefix_witness: CodexRolloutPrefixWitness | None = None,
+    max_bytes: int = _MAX_ROLLOUT_BYTES,
+) -> CodexSelectionEvidence:
+    """Confined-read the one rollout bound to ``expected_thread_id``."""
+
+    _validate_thread_id(expected_thread_id)
+    try:
+        encoded_thread_id = expected_thread_id.encode("ascii", errors="strict")
+    except UnicodeEncodeError:
+        raise _invalid_protocol("Codex rollout thread ID is not a canonical UUID") from None
+    if _UUID.fullmatch(encoded_thread_id) is None:
+        raise _invalid_protocol("Codex rollout thread ID is not a canonical UUID")
+
+    try:
+        filesystem = ConfinedFilesystem.open(Path(codex_home) / "sessions")
+    except (AgentLoopError, OSError, TypeError, ValueError):
+        raise _invalid_protocol("Codex rollout root cannot be opened safely") from None
+    with filesystem:
+        candidates: list[tuple[int, os.stat_result]] = []
+        try:
+            _walk_private_rollout_namespace(
+                filesystem.fileno(),
+                prefix=b"",
+                depth=0,
+                encoded_thread_id=encoded_thread_id,
+                entry_count=[0],
+                candidates=candidates,
+            )
+            if len(candidates) != 1:
+                raise _invalid_protocol("Codex rollout selection is missing or ambiguous")
+            data = _read_private_rollout_descriptor(
+                candidates[0][0],
+                candidates[0][1],
+                max_bytes=max_bytes,
+            )
+        finally:
+            for candidate_fd, _info in candidates:
+                os.close(candidate_fd)
+    return parse_codex_rollout_selection(
+        data,
+        expected_thread_id=expected_thread_id,
+        expected_previous_turn_ids=expected_previous_turn_ids,
+        expected_prefix_witness=expected_prefix_witness,
+        max_bytes=max_bytes,
+    )
+
+
+def attach_codex_rollout_selection(
+    result: CodexTurnResult,
+    codex_home: str | os.PathLike[str],
+    *,
+    expected_previous_turn_ids: tuple[str, ...] | None,
+    expected_prefix_witness: CodexRolloutPrefixWitness | None,
+    expected_model: str,
+    expected_effort: str,
+) -> tuple[CodexTurnResult, tuple[str, ...], CodexRolloutPrefixWitness]:
+    """Bind resolved rollout facts to a turn with no pinned public reroute signal."""
+
+    if not isinstance(result, CodexTurnResult):
+        raise TypeError("result must be a CodexTurnResult")
+    if not isinstance(expected_model, str) or _MODEL_ID.fullmatch(expected_model) is None:
+        raise ValueError("expected_model is invalid")
+    if not isinstance(expected_effort, str) or _EFFORT.fullmatch(expected_effort) is None:
+        raise ValueError("expected_effort is invalid")
+    evidence = read_codex_rollout_selection(
+        codex_home,
+        expected_thread_id=result.thread_id,
+        expected_previous_turn_ids=expected_previous_turn_ids,
+        expected_prefix_witness=expected_prefix_witness,
+    )
+    observed_model = _coalesce_fact(
+        result.observed_model, evidence.model, name="model"
+    )
+    observed_effort = _coalesce_fact(
+        result.observed_effort, evidence.effort, name="effort"
+    )
+    if observed_model != expected_model or observed_effort != expected_effort:
+        raise _invalid_protocol("Codex rollout did not confirm the requested selection")
+    return (
+        replace(
+            result,
+            observed_model=observed_model,
+            observed_effort=observed_effort,
+        ),
+        evidence.turn_ids,
+        evidence.rollout_prefix,
     )
 
 

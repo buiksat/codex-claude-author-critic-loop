@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import shutil
 import stat
 import tomllib
@@ -25,6 +27,8 @@ from agent_loop.codex_client import (
     classify_codex_process_result,
     install_sanitized_codex_config,
     parse_codex_jsonl,
+    parse_codex_rollout_selection,
+    read_codex_rollout_selection,
 )
 from agent_loop.credentials import CodexCredentialTransaction, codex_credential_root
 from agent_loop.errors import AgentLoopError, ExitCode, StopReason
@@ -32,6 +36,131 @@ from agent_loop.service import BoundedProcessResult, run_bounded_process
 
 
 AUTH = b'{"access_token":"fake-only-secret"}'
+ROLLOUT_THREAD_ID = "019f825d-5ede-7793-831d-884ce62c2caa"
+ROLLOUT_TURN_IDS = (
+    "019f825d-5f0c-7b33-a270-65c1adbdeb8a",
+    "019f825d-98f2-7c61-a58e-dd0175c9191c",
+    "019f825d-a001-7000-8000-000000000001",
+    "019f825d-a002-7000-8000-000000000002",
+    "019f825d-a003-7000-8000-000000000003",
+)
+
+
+def codex_rollout(turn_ids: tuple[str, ...]) -> bytes:
+    events: list[dict[str, object]] = [
+        {
+            "timestamp": "2026-07-21T01:49:45.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": ROLLOUT_THREAD_ID,
+                "session_id": ROLLOUT_THREAD_ID,
+                "timestamp": "2026-07-21T01:49:45.000Z",
+                "cwd": "/runtime/author-cwd",
+                "originator": "codex_exec",
+                "cli_version": "0.144.6",
+                "source": "exec",
+                "model_provider": "openai",
+                "base_instructions": None,
+                "history_mode": "legacy",
+            },
+        }
+    ]
+    cursor = 0
+    while cursor < len(turn_ids):
+        turn_id = turn_ids[cursor]
+        run_end = cursor + 1
+        while run_end < len(turn_ids) and turn_ids[run_end] == turn_id:
+            run_end += 1
+        events.append(
+            {
+                "timestamp": "2026-07-21T01:49:46.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_started",
+                    "turn_id": turn_id,
+                    "trace_id": f"trace-{turn_id}",
+                    "started_at": 1_774_000_000,
+                    "model_context_window": 128_000,
+                    "collaboration_mode_kind": "default",
+                },
+            }
+        )
+        for duplicate_index in range(run_end - cursor):
+            if duplicate_index:
+                events.append(
+                    {
+                        "timestamp": "2026-07-21T01:49:47.000Z",
+                        "type": "compacted",
+                        "payload": {"message": "sanitized compaction"},
+                    }
+                )
+            events.append(
+                {
+                    "timestamp": "2026-07-21T01:49:47.000Z",
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": turn_id,
+                        "cwd": "/runtime/author-cwd",
+                        "approval_policy": "never",
+                        "sandbox_policy": {
+                            "type": "workspace-write",
+                            "network_access": False,
+                            "exclude_tmpdir_env_var": True,
+                            "exclude_slash_tmp": True,
+                        },
+                        "model": "gpt-5.4",
+                        "effort": "high",
+                        "summary": "auto",
+                    },
+                }
+            )
+        events.extend(
+            (
+                {
+                    "timestamp": "2026-07-21T01:49:48.000Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "sanitized output"}
+                        ],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-21T01:49:49.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": turn_id,
+                        "last_agent_message": "sanitized output",
+                        "completed_at": 1_774_000_001,
+                        "duration_ms": 1_000,
+                        "time_to_first_token_ms": 100,
+                    },
+                },
+            )
+        )
+        cursor = run_end
+    return b"\n".join(
+        json.dumps(event, separators=(",", ":")).encode("utf-8") for event in events
+    ) + b"\n"
+
+
+def install_rollout(codex_home: Path, data: bytes) -> Path:
+    day = codex_home / "sessions" / "2026" / "07" / "21"
+    day.mkdir(mode=0o700, parents=True)
+    for directory in (codex_home, codex_home / "sessions", *day.parents):
+        if directory == codex_home.parent:
+            break
+        directory.chmod(0o700)
+    rollout = day / (
+        "rollout-2026-07-21T01-49-45-"
+        f"{ROLLOUT_THREAD_ID}.jsonl"
+    )
+    rollout.write_bytes(data)
+    rollout.chmod(0o600)
+    return rollout
 
 
 def valid_auth(data: bytes) -> bool:
@@ -309,6 +438,398 @@ def test_jsonl_parser_captures_only_thread_started_id_and_model_usage_facts() ->
     assert result.usage.output_tokens == 4
     assert result.event_json[0] == payload.splitlines()[0]
     assert result.completed_at == 7.0
+
+
+def test_pinned_jsonl_contract_has_no_model_or_effort_metadata() -> None:
+    events = (
+        {"type": "thread.started", "thread_id": ROLLOUT_THREAD_ID},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "complete"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 9, "output_tokens": 4},
+        },
+    )
+    payload = b"\n".join(
+        json.dumps(event, separators=(",", ":")).encode() for event in events
+    ) + b"\n"
+
+    result = parse_codex_jsonl(payload, expected_thread_id=ROLLOUT_THREAD_ID)
+
+    assert result.observed_model is None
+    assert result.observed_effort is None
+
+
+def test_pinned_jsonl_model_reroute_signal_fails_closed() -> None:
+    events = (
+        {"type": "thread.started", "thread_id": ROLLOUT_THREAD_ID},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_0",
+                "type": "error",
+                "message": (
+                    "model rerouted: gpt-5.4 -> gpt-5.2 "
+                    "(HighRiskCyberActivity)"
+                ),
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "complete"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 9, "output_tokens": 4},
+        },
+    )
+    payload = b"\n".join(
+        json.dumps(event, separators=(",", ":")).encode() for event in events
+    ) + b"\n"
+
+    with pytest.raises(AgentLoopError, match="rerouted the requested model"):
+        parse_codex_jsonl(payload, expected_thread_id=ROLLOUT_THREAD_ID)
+
+
+def test_rollout_selection_tracks_first_resume_and_same_turn_compaction() -> None:
+    first = parse_codex_rollout_selection(
+        codex_rollout((ROLLOUT_TURN_IDS[0], ROLLOUT_TURN_IDS[0])),
+        expected_thread_id=ROLLOUT_THREAD_ID,
+    )
+    resumed = parse_codex_rollout_selection(
+        codex_rollout(
+            (
+                ROLLOUT_TURN_IDS[0],
+                ROLLOUT_TURN_IDS[0],
+                ROLLOUT_TURN_IDS[1],
+                ROLLOUT_TURN_IDS[1],
+            )
+        ),
+        expected_thread_id=ROLLOUT_THREAD_ID,
+        expected_previous_turn_ids=first.turn_ids,
+        expected_prefix_witness=first.rollout_prefix,
+    )
+
+    assert (first.model, first.effort) == ("gpt-5.4", "high")
+    assert first.turn_id == ROLLOUT_TURN_IDS[0]
+    assert first.turn_ids == ROLLOUT_TURN_IDS[:1]
+    assert resumed.turn_id == ROLLOUT_TURN_IDS[1]
+    assert resumed.turn_ids == ROLLOUT_TURN_IDS[:2]
+
+
+def test_rollout_selection_rejects_stale_resume_and_surrogate_metadata() -> None:
+    first_data = codex_rollout((ROLLOUT_TURN_IDS[0],))
+    first = parse_codex_rollout_selection(
+        first_data,
+        expected_thread_id=ROLLOUT_THREAD_ID,
+    )
+    trailing_item = json.dumps(
+        {
+            "timestamp": "2026-07-21T01:49:50.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "sanitized"}],
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    with pytest.raises(AgentLoopError, match="did not advance"):
+        parse_codex_rollout_selection(
+            first_data + trailing_item + b"\n",
+            expected_thread_id=ROLLOUT_THREAD_ID,
+            expected_previous_turn_ids=first.turn_ids,
+            expected_prefix_witness=first.rollout_prefix,
+        )
+
+    hostile = codex_rollout((ROLLOUT_TURN_IDS[0],)).replace(
+        b'"2026-07-21T01:49:45.000Z"', b'"\\ud800"', 1
+    )
+    with pytest.raises(AgentLoopError) as caught:
+        parse_codex_rollout_selection(
+            hostile,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+    assert "ud800" not in caught.value.detail
+
+
+@pytest.mark.parametrize(
+    "observed_turn_ids",
+    (
+        # Prepend an unaccepted turn before the exact accepted history.
+        (
+            ROLLOUT_TURN_IDS[4],
+            ROLLOUT_TURN_IDS[0],
+            ROLLOUT_TURN_IDS[1],
+            ROLLOUT_TURN_IDS[2],
+            ROLLOUT_TURN_IDS[3],
+        ),
+        # Insert an unaccepted turn into the accepted history.
+        (
+            ROLLOUT_TURN_IDS[0],
+            ROLLOUT_TURN_IDS[4],
+            ROLLOUT_TURN_IDS[1],
+            ROLLOUT_TURN_IDS[2],
+            ROLLOUT_TURN_IDS[3],
+        ),
+        # Delete a previously accepted turn.
+        (
+            ROLLOUT_TURN_IDS[0],
+            ROLLOUT_TURN_IDS[2],
+            ROLLOUT_TURN_IDS[3],
+        ),
+        # Reorder previously accepted turns.
+        (
+            ROLLOUT_TURN_IDS[1],
+            ROLLOUT_TURN_IDS[0],
+            ROLLOUT_TURN_IDS[2],
+            ROLLOUT_TURN_IDS[3],
+        ),
+    ),
+    ids=("prepend", "insertion", "deletion", "reorder"),
+)
+def test_rollout_selection_rejects_mutated_accepted_history(
+    observed_turn_ids: tuple[str, ...],
+) -> None:
+    accepted = parse_codex_rollout_selection(
+        codex_rollout(ROLLOUT_TURN_IDS[:1]),
+        expected_thread_id=ROLLOUT_THREAD_ID,
+    )
+    for turn_count in (2, 3):
+        accepted = parse_codex_rollout_selection(
+            codex_rollout(ROLLOUT_TURN_IDS[:turn_count]),
+            expected_thread_id=ROLLOUT_THREAD_ID,
+            expected_previous_turn_ids=accepted.turn_ids,
+            expected_prefix_witness=accepted.rollout_prefix,
+        )
+    with pytest.raises(AgentLoopError, match="accepted byte prefix"):
+        parse_codex_rollout_selection(
+            codex_rollout(observed_turn_ids),
+            expected_thread_id=ROLLOUT_THREAD_ID,
+            expected_previous_turn_ids=accepted.turn_ids,
+            expected_prefix_witness=accepted.rollout_prefix,
+        )
+
+
+@pytest.mark.parametrize("nested_type", ("model_reroute", "model_verification"))
+def test_rollout_selection_rejects_transient_event_types(nested_type: str) -> None:
+    base = codex_rollout(ROLLOUT_TURN_IDS[:1]).rstrip(b"\n")
+    transient = {
+        "timestamp": "2026-07-21T01:49:48.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": nested_type,
+        },
+    }
+
+    with pytest.raises(AgentLoopError, match="event type is unsupported"):
+        parse_codex_rollout_selection(
+            base + b"\n" + json.dumps(transient).encode() + b"\n",
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("outer_type", "payload"),
+    (
+        ("future_rollout_item", {}),
+        ("event_msg", {"type": "future_event"}),
+        ("event_msg", {"type": "turn_started"}),
+        ("event_msg", {"type": "turn_complete"}),
+    ),
+    ids=("outer", "nested", "started-alias", "complete-alias"),
+)
+def test_rollout_selection_rejects_unknown_outer_and_nested_types(
+    outer_type: str,
+    payload: dict[str, object],
+) -> None:
+    extra = json.dumps(
+        {
+            "timestamp": "2026-07-21T01:49:50.000Z",
+            "type": outer_type,
+            "payload": payload,
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    with pytest.raises(AgentLoopError, match="type is unsupported"):
+        parse_codex_rollout_selection(
+            codex_rollout(ROLLOUT_TURN_IDS[:1]) + extra + b"\n",
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ("missing-start", "missing-context", "missing-complete", "wrong-complete", "bad-start"),
+)
+def test_rollout_selection_requires_exact_real_turn_lifecycle(scenario: str) -> None:
+    events = [json.loads(line) for line in codex_rollout(ROLLOUT_TURN_IDS[:1]).splitlines()]
+    started_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "event_msg"
+        and event["payload"]["type"] == "task_started"
+    )
+    context_index = next(
+        index for index, event in enumerate(events) if event["type"] == "turn_context"
+    )
+    completed_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "event_msg"
+        and event["payload"]["type"] == "task_complete"
+    )
+    if scenario == "missing-start":
+        del events[started_index]
+    elif scenario == "missing-context":
+        del events[context_index]
+    elif scenario == "missing-complete":
+        del events[completed_index]
+    elif scenario == "wrong-complete":
+        events[completed_index]["payload"]["turn_id"] = ROLLOUT_TURN_IDS[1]
+    else:
+        del events[started_index]["payload"]["model_context_window"]
+    data = b"\n".join(
+        json.dumps(event, separators=(",", ":")).encode() for event in events
+    ) + b"\n"
+
+    with pytest.raises(AgentLoopError):
+        parse_codex_rollout_selection(data, expected_thread_id=ROLLOUT_THREAD_ID)
+
+
+@pytest.mark.parametrize("nested_type", ("turn_aborted", "thread_rolled_back"))
+def test_rollout_selection_rejects_history_transitions(nested_type: str) -> None:
+    transition = json.dumps(
+        {
+            "timestamp": "2026-07-21T01:49:50.000Z",
+            "type": "event_msg",
+            "payload": {"type": nested_type},
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    with pytest.raises(AgentLoopError, match="rejected history transition"):
+        parse_codex_rollout_selection(
+            codex_rollout(ROLLOUT_TURN_IDS[:1]) + transition + b"\n",
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+
+
+def test_rollout_selection_rejects_rewritten_prior_selection_with_same_ids() -> None:
+    first_data = codex_rollout(ROLLOUT_TURN_IDS[:1])
+    first = parse_codex_rollout_selection(
+        first_data,
+        expected_thread_id=ROLLOUT_THREAD_ID,
+    )
+    rewritten = codex_rollout(ROLLOUT_TURN_IDS[:2]).replace(
+        b'"model":"gpt-5.4"',
+        b'"model":"gpt-5.3"',
+        1,
+    )
+
+    with pytest.raises(AgentLoopError, match="accepted byte prefix"):
+        parse_codex_rollout_selection(
+            rewritten,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+            expected_previous_turn_ids=first.turn_ids,
+            expected_prefix_witness=first.rollout_prefix,
+        )
+
+
+def test_confined_rollout_reader_selects_exact_private_thread(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    install_rollout(codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],)))
+
+    selected = read_codex_rollout_selection(
+        codex_home,
+        expected_thread_id=ROLLOUT_THREAD_ID,
+    )
+
+    assert selected.turn_id == ROLLOUT_TURN_IDS[0]
+    assert selected.model == "gpt-5.4"
+    assert selected.effort == "high"
+
+
+def test_confined_rollout_reader_rejects_nonprivate_file(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    rollout = install_rollout(
+        codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],))
+    )
+    rollout.chmod(0o640)
+
+    with pytest.raises(AgentLoopError, match="unsafe entry"):
+        read_codex_rollout_selection(
+            codex_home,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+
+
+def test_confined_rollout_reader_rejects_hardlink_and_symlink_boundaries(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "hardlink-home"
+    codex_home.mkdir(mode=0o700)
+    rollout = install_rollout(
+        codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],))
+    )
+    os.link(rollout, tmp_path / "second-rollout-link")
+    with pytest.raises(AgentLoopError, match="unsafe entry"):
+        read_codex_rollout_selection(
+            codex_home,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+
+    symlink_home = tmp_path / "symlink-home"
+    symlink_home.mkdir(mode=0o700)
+    symlink_home.chmod(0o700)
+    external_sessions = tmp_path / "external-sessions"
+    external_sessions.mkdir(mode=0o700)
+    (symlink_home / "sessions").symlink_to(external_sessions, target_is_directory=True)
+    with pytest.raises(AgentLoopError, match="root cannot be opened safely"):
+        read_codex_rollout_selection(
+            symlink_home,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
+
+
+def test_confined_rollout_reader_rejects_xattrs_and_ignores_compressed_decoy(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    rollout = install_rollout(
+        codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],))
+    )
+    compressed = rollout.with_name(
+        "rollout-2026-07-21T01-49-44-"
+        "019f825d-0000-7000-8000-000000000001.jsonl.zst"
+    )
+    compressed.write_bytes(b"opaque compressed decoy")
+    compressed.chmod(0o600)
+    assert read_codex_rollout_selection(
+        codex_home,
+        expected_thread_id=ROLLOUT_THREAD_ID,
+    ).model == "gpt-5.4"
+
+    try:
+        os.setxattr(rollout, b"user.agent-loop-test", b"forbidden")
+    except OSError as error:
+        if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM}:
+            pytest.skip("test filesystem does not support user xattrs")
+        raise
+    with pytest.raises(AgentLoopError, match="metadata is ambiguous"):
+        read_codex_rollout_selection(
+            codex_home,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        )
 
 
 @pytest.mark.parametrize(

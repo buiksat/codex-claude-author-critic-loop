@@ -1886,6 +1886,8 @@ class ProductionWorkflowBackend:
                 toolchain_mounts=toolchain,
                 timeout_seconds=config.author_timeout_seconds,
                 output_max_bytes=config.limits.max_agent_output_bytes,
+                model=config.author_model,
+                effort=config.author_effort,
                 attempt_sink=sink,
                 secret_refresh=current_secrets,
                 clock=self.clock,

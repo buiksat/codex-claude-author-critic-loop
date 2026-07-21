@@ -450,6 +450,8 @@ def test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation(
                 install_mount=install.mount,
                 executable=install.sandbox_executable,
                 timeout_seconds=180,
+                model=model,
+                effort=effort,
             )
 
             first_prompt = (

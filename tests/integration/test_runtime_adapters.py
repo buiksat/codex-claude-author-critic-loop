@@ -1090,6 +1090,119 @@ def _codex_jsonl(thread_id: str) -> bytes:
     return b"\n".join(json.dumps(value, separators=(",", ":")).encode() for value in values) + b"\n"
 
 
+_ROLLOUT_THREAD_ID = "019f825d-5ede-7793-831d-884ce62c2caa"
+_ROLLOUT_TURN_IDS = (
+    "019f825d-5f0c-7b33-a270-65c1adbdeb8a",
+    "019f825d-98f2-7c61-a58e-dd0175c9191c",
+    "019f825d-a003-7000-8000-000000000003",
+)
+
+
+def _pinned_codex_jsonl(thread_id: str) -> bytes:
+    values = (
+        {"type": "thread.started", "thread_id": thread_id},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+    )
+    return b"\n".join(
+        json.dumps(value, separators=(",", ":")).encode() for value in values
+    ) + b"\n"
+
+
+def _runtime_rollout(turn_ids: tuple[str, ...]) -> bytes:
+    events: list[dict[str, object]] = [
+        {
+            "timestamp": "2026-07-21T01:49:45.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": _ROLLOUT_THREAD_ID,
+                "session_id": _ROLLOUT_THREAD_ID,
+                "timestamp": "2026-07-21T01:49:45.000Z",
+                "cwd": "/runtime/author-cwd",
+                "originator": "codex_exec",
+                "cli_version": "0.144.6",
+                "source": "exec",
+                "model_provider": "openai",
+                "base_instructions": None,
+                "history_mode": "legacy",
+            },
+        }
+    ]
+    for turn_id in turn_ids:
+        events.extend(
+            (
+                {
+                    "timestamp": "2026-07-21T01:49:46.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_started",
+                        "turn_id": turn_id,
+                        "trace_id": f"trace-{turn_id}",
+                        "started_at": 1_774_000_000,
+                        "model_context_window": 128_000,
+                        "collaboration_mode_kind": "default",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-21T01:49:47.000Z",
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": turn_id,
+                        "cwd": "/runtime/author-cwd",
+                        "approval_policy": "never",
+                        "sandbox_policy": {
+                            "type": "workspace-write",
+                            "network_access": False,
+                            "exclude_tmpdir_env_var": True,
+                            "exclude_slash_tmp": True,
+                        },
+                        "model": "gpt-5.4",
+                        "effort": "high",
+                        "summary": "auto",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-21T01:49:48.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": turn_id,
+                        "last_agent_message": "sanitized output",
+                        "completed_at": 1_774_000_001,
+                        "duration_ms": 1_000,
+                        "time_to_first_token_ms": 100,
+                    },
+                },
+            )
+        )
+    return b"\n".join(
+        json.dumps(event, separators=(",", ":")).encode() for event in events
+    ) + b"\n"
+
+
+def _write_runtime_rollout(codex_home: Path, turn_ids: tuple[str, ...]) -> Path:
+    codex_home.mkdir(mode=0o700, exist_ok=True)
+    codex_home.chmod(0o700)
+    sessions = codex_home / "sessions"
+    year = sessions / "2026"
+    month = year / "07"
+    day = month / "21"
+    day.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for directory in (sessions, year, month, day):
+        directory.chmod(0o700)
+    rollout = day / (
+        "rollout-2026-07-21T01-49-45-"
+        f"{_ROLLOUT_THREAD_ID}.jsonl"
+    )
+    rollout.write_bytes(_runtime_rollout(turn_ids))
+    rollout.chmod(0o600)
+    return rollout
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_reason"),
     (
@@ -1246,6 +1359,282 @@ def test_065_codex_adapter_routes_first_resume_and_reconciles_before_acceptance(
             "LANG": "C.UTF-8",
             "CODEX_HOME": "/control/codex-home",
         }
+
+
+def test_codex_adapter_attests_pinned_first_and_resume_selection_from_rollout(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    executor = ScriptedExecutor(
+        stdout=_pinned_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+        events=events,
+    )
+    codex_home = tmp_path / "codex-home"
+    rollout = _write_runtime_rollout(codex_home, (_ROLLOUT_TURN_IDS[0],))
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, events),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+
+    first = adapter.turn(
+        AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
+    )
+    rollout.write_bytes(_runtime_rollout(_ROLLOUT_TURN_IDS[:2]))
+    rollout.chmod(0o600)
+    resumed = adapter.turn(
+        AuthorRequest(
+            2,
+            SubjectManifest.empty(),
+            "revise",
+            first.thread_id,
+            1_000,
+        )
+    )
+
+    assert (first.observed_model, first.observed_effort) == ("gpt-5.4", "high")
+    assert (resumed.observed_model, resumed.observed_effort) == ("gpt-5.4", "high")
+    assert resumed.thread_id == first.thread_id
+    assert events == ["execute", "reconcile", "persist"] * 2
+
+
+def test_codex_adapter_resume_rejects_history_prepended_before_prior_turn(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    executor = ScriptedExecutor(
+        stdout=_pinned_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+        events=events,
+    )
+    codex_home = tmp_path / "codex-home"
+    rollout = _write_runtime_rollout(codex_home, _ROLLOUT_TURN_IDS[:1])
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, events),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+
+    first = adapter.turn(
+        AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
+    )
+    rollout.write_bytes(
+        _runtime_rollout(
+            (
+                _ROLLOUT_TURN_IDS[2],
+                _ROLLOUT_TURN_IDS[0],
+                _ROLLOUT_TURN_IDS[1],
+            )
+        )
+    )
+    rollout.chmod(0o600)
+
+    with pytest.raises(AgentLoopError, match="accepted byte prefix"):
+        adapter.turn(
+            AuthorRequest(
+                2,
+                SubjectManifest.empty(),
+                "resume",
+                first.thread_id,
+                1_000,
+            )
+        )
+
+    assert len(executor.calls) == 2
+    assert events == [
+        "execute",
+        "reconcile",
+        "persist",
+        "execute",
+        "reconcile",
+    ]
+
+
+def test_codex_adapter_rejects_duplicate_first_before_executor_call(
+    tmp_path: Path,
+) -> None:
+    executor = ScriptedExecutor(
+        stdout=_pinned_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+    )
+    codex_home = tmp_path / "codex-home"
+    _write_runtime_rollout(codex_home, (_ROLLOUT_TURN_IDS[0],))
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, []),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+    adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
+    calls_after_first = len(executor.calls)
+
+    with pytest.raises(AgentLoopError, match="inconsistent with a first turn"):
+        adapter.turn(
+            AuthorRequest(1, SubjectManifest.empty(), "duplicate", None, 1_000)
+        )
+
+    assert calls_after_first == 1
+    assert len(executor.calls) == calls_after_first
+
+
+def test_codex_adapter_rejects_resume_without_prior_state_before_executor_call(
+    tmp_path: Path,
+) -> None:
+    executor = ScriptedExecutor(
+        stdout=_pinned_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+    )
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, []),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+
+    with pytest.raises(AgentLoopError, match="inconsistent with exact resume"):
+        adapter.turn(
+            AuthorRequest(
+                2,
+                SubjectManifest.empty(),
+                "resume",
+                _ROLLOUT_THREAD_ID,
+                1_000,
+            )
+        )
+
+    assert executor.calls == []
+
+
+def test_codex_adapter_rejects_wrong_thread_resume_before_executor_call(
+    tmp_path: Path,
+) -> None:
+    executor = ScriptedExecutor(
+        stdout=_pinned_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+    )
+    codex_home = tmp_path / "codex-home"
+    _write_runtime_rollout(codex_home, (_ROLLOUT_TURN_IDS[0],))
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, []),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+    adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
+    calls_after_first = len(executor.calls)
+
+    with pytest.raises(AgentLoopError, match="inconsistent with exact resume"):
+        adapter.turn(
+            AuthorRequest(
+                2,
+                SubjectManifest.empty(),
+                "wrong thread",
+                "019f825d-ffff-7000-8000-000000000001",
+                1_000,
+            )
+        )
+
+    assert calls_after_first == 1
+    assert len(executor.calls) == calls_after_first
+
+
+def test_codex_rollout_failure_is_reconciled_and_retained_before_rejection(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    attempts: list[tuple[SandboxRole, int, SandboxExecution]] = []
+    executor = ScriptedExecutor(
+        stdout=_pinned_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+        events=events,
+    )
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    codex_home.chmod(0o700)
+    (codex_home / "sessions").mkdir(mode=0o700)
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, events),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        attempt_sink=lambda role, attempt, execution: attempts.append(
+            (role, attempt, execution)
+        ),
+        clock=lambda: 0.0,
+    )
+
+    with pytest.raises(AgentLoopError, match="missing or ambiguous"):
+        adapter.turn(
+            AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
+        )
+
+    assert events == ["execute", "reconcile"]
+    assert len(attempts) == 1 and attempts[0][0:2] == (SandboxRole.AUTHOR, 1)
+
+
+def test_codex_adapter_rejects_stdout_and_rollout_selection_contradiction(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    executor = ScriptedExecutor(
+        stdout=_codex_jsonl(_ROLLOUT_THREAD_ID),
+        candidate=SubjectManifest.empty(),
+        events=events,
+    )
+    codex_home = tmp_path / "codex-home"
+    _write_runtime_rollout(codex_home, (_ROLLOUT_TURN_IDS[0],))
+    install = tmp_path / "codex-install"
+    install.mkdir()
+    adapter = SandboxedCodexAuthorAdapter(
+        executor,  # type: ignore[arg-type]
+        RecordingTransaction(codex_home, events),
+        install_mount=SandboxMount(str(install), "/opt/reviewed-codex"),
+        executable="/opt/reviewed-codex/codex",
+        model="gpt-5.4",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+
+    with pytest.raises(AgentLoopError, match="contradictory model"):
+        adapter.turn(
+            AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
+        )
+
+    assert events == ["execute", "reconcile"]
 
 
 def test_codex_refresh_failure_blocks_candidate_persistence(tmp_path: Path) -> None:

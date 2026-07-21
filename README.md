@@ -9,12 +9,19 @@ The version-1 implementation paths, portable control plane, executable fake-agen
 target-host containment components have broad automated coverage. Qualification is nevertheless
 incomplete: the required Ruff/strict-mypy gates were unavailable, and several pinned-CLI behavioral
 clauses remain unproved. The managed Claude system boundary is installed and passed its no-network
-initialization probe. One explicitly authorized qualification was attempted but failed before the
+initialization probe. The first explicitly authorized qualification failed before the
 Codex resume: the documented Codex selector was absent from the pinned CLI's bundled and cached
 model catalogs, making it the strongest diagnosis for that otherwise opaque failure, while the
-dedicated Claude token was rejected with HTTP 401. The selector is corrected, but the token still
-needs rotation and the live gates still need a fresh authorization, so no capability receipt
-exists and the runtime remains intentionally blocked. No paid model call is required by
+dedicated Claude token was rejected with HTTP 401. After correcting the selector and rotating the
+token, a second explicitly authorized qualification reached the Claude review and both Codex
+turns, then finished with 24 passes and two failures. Claude authenticated but returned an `LGTM`
+shape that the old JSON Schema accepted and the local semantic validator rejected; Codex completed
+the first turn and exact resume on one thread, but its pinned public JSONL omitted positive model
+and effort facts. Local remediations now encode the verdict invariants in the critic schema and
+prompt, and pair Codex's successful public events with a strictly confined private per-thread
+rollout's resolved request selection, lifecycle, and append-only prefix witness. Those changes have
+not yet passed a new live qualification, so no capability receipt exists and the runtime remains
+intentionally blocked. No paid model call is required by
 installation or the normal test suite. Do not treat the package as a production security boundary;
 see
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for current evidence.
@@ -272,9 +279,13 @@ python3.14 -m pytest -q tests/host tests/real_cli
 ```
 
 The two `AGENT_LOOP_CONFIRM_PAID_*` variables authorize real, potentially billable model traffic:
-one Codex first-turn call, one exact-resume call, and one Claude review call. Do not export them for
-installation or a dry check. The managed-policy selectors are non-secret identifiers, not a
-substitute for the installed and locally verified boundary.
+one Codex first-turn call, one exact-resume call, and one Claude CLI review invocation. That Claude
+invocation may make one initial model request and, only when its output fails the supplied schema,
+at most one schema-correction model request. Its separately configured
+`CLAUDE_CODE_MAX_RETRIES=2` API retry budget can retry API attempts and is not the schema-correction
+budget. Do not export the confirmation variables for installation or a dry check. The
+managed-policy selectors are non-secret identifiers, not a substitute for the installed and
+locally verified boundary.
 
 At pytest session finish, a receipt is written only if target-host gates 8/9/10/11/29/30/71, the
 combined Codex gates 33/65/66, and Claude gate 49 truly pass, including exact observed model/effort
@@ -297,7 +308,14 @@ current preflight; any mismatch, stale timestamp, unsafe metadata, or absent rec
 spending. Version-1 receipts are neither accepted nor migrated: changing to this boundary requires a
 new successful combined live session to mint `live-v2.json`.
 
-The failed qualification described above did not mint a receipt. Installation, documentation, and
+For Codex 0.144.6, the public success stream is first checked for the pinned server-reroute error
+signal. The adapter then confined-reads one exact-thread private rollout, accepts only frozen
+durable item types and complete turn lifecycles, and matches the client-resolved model/effort to
+the request. Ordinary resume must preserve the prior bytes as a SHA-256-witnessed prefix plus
+exactly one turn. Raw rollout contents and the in-memory prefix witness are never copied into run
+artifacts.
+
+Neither failed qualification described above minted a receipt. Installation, documentation, and
 the normal test suite do not run model calls. Do not set the live gates until all portable,
 fake-agent, and target-host tests pass and the operator has explicitly authorized the exact
 accounts, models, timeouts, and calls. A skipped or xfailed test is not a successful smoke test.
@@ -395,12 +413,17 @@ python3.14 -m pytest -q -m 'not real_cli'
 python3.14 -m compileall -q src tests
 ```
 
-At this revision, pytest collected 629 tests; 602 portable tests and 22 host-marked tests passed,
-and the combined non-real-CLI selection passed 624 tests. That selection excludes all five
-`real_cli`-marked nodes. Two non-model Codex probes and one pinned-Claude canonical-schema probe
-against a process-local fake endpoint were run separately and passed. One credentialed Codex
-first-turn and one Claude critic call were attempted in a combined qualification and failed; the
-Codex resume was not reached and no receipt was written.
+At this revision, pytest collected 674 tests; 646 portable tests and 22 host-marked tests passed,
+and the combined non-real-CLI selection passed 668 tests. That selection excludes all six
+`real_cli`-marked nodes. Two non-model Codex probes and two pinned-Claude schema probes against
+process-local fake endpoints were run separately and passed. The Claude probes prove canonical
+schema handoff and exactly one correction retry without external network or model traffic. The
+first combined live qualification finished with 23 passes and three failures before Codex resume.
+After its selector and credential remediations, a second combined qualification exercised Claude
+plus both Codex turns and finished with 24 passes and two failures. Claude's old schema admitted a
+semantically contradictory review, and Codex's public JSONL omitted model/effort selection facts.
+The locally reviewed schema and private-rollout evidence remediations still require a fresh
+explicitly authorized combined qualification; no receipt was written.
 
 Run target-host checks only on the frozen matrix:
 

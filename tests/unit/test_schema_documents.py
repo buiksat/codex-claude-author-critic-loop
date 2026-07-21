@@ -165,6 +165,80 @@ def test_critic_draft_07_definition_reference_enforces_finding_contract() -> Non
         selected.validate(review)
 
 
+def _critic_finding() -> dict[str, object]:
+    return {
+        "id": "C1",
+        "severity": "high",
+        "category": "correctness",
+        "file": "src/example.py",
+        "symbol": None,
+        "line_start": 1,
+        "line_end": 1,
+        "problem": "The result is incorrect.",
+        "evidence": "The focused check fails.",
+        "required_fix": "Return the expected value.",
+    }
+
+
+def _critic_review(
+    verdict: str,
+    *,
+    blocked_reason: str | None,
+    blocking: bool,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "verdict": verdict,
+        "summary": "Assessment complete.",
+        "blocked_reason": blocked_reason,
+        "blocking_findings": [_critic_finding()] if blocking else [],
+        "non_blocking_findings": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("review",),
+    [
+        (_critic_review("LGTM", blocked_reason="No blocking issues.", blocking=False),),
+        (_critic_review("LGTM", blocked_reason=None, blocking=True),),
+        (_critic_review("REVISE", blocked_reason=None, blocking=False),),
+        (_critic_review("REVISE", blocked_reason="External input missing.", blocking=True),),
+        (_critic_review("BLOCKED", blocked_reason=None, blocking=False),),
+        (_critic_review("BLOCKED", blocked_reason=" \t\n", blocking=False),),
+        (_critic_review("BLOCKED", blocked_reason="External input missing.", blocking=True),),
+    ],
+    ids=(
+        "lgtm-reason",
+        "lgtm-blocking",
+        "revise-empty",
+        "revise-reason",
+        "blocked-no-reason",
+        "blocked-whitespace-reason",
+        "blocked-finding",
+    ),
+)
+def test_critic_draft_07_schema_rejects_cross_verdict_contradictions(
+    review: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        Draft7Validator(critic_schema_document()).validate(review)
+
+
+@pytest.mark.parametrize(
+    ("review",),
+    [
+        (_critic_review("LGTM", blocked_reason=None, blocking=False),),
+        (_critic_review("REVISE", blocked_reason=None, blocking=True),),
+        (_critic_review("BLOCKED", blocked_reason="External input missing.", blocking=False),),
+    ],
+    ids=("lgtm", "revise", "blocked"),
+)
+def test_critic_draft_07_schema_accepts_each_canonical_verdict_shape(
+    review: dict[str, object],
+) -> None:
+    Draft7Validator(critic_schema_document()).validate(review)
+
+
 def test_subject_schema_accepts_actual_regular_and_symlink_serializer_output() -> None:
     regular_data = b"print('ok')\n"
     manifest = SubjectManifest.build(

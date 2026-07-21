@@ -23,7 +23,14 @@ from typing import Protocol
 from . import claude_managed_policy
 from .artifacts import ContentAddressedBlobStore
 from .claude_client import ClaudeClient, ClaudeInvocation
-from .codex_client import CodexClient, CodexInvocation, build_codex_parent_environment
+from .codex_client import (
+    CodexClient,
+    CodexInvocation,
+    CodexRolloutPrefixWitness,
+    SanitizedCodexConfig,
+    attach_codex_rollout_selection,
+    build_codex_parent_environment,
+)
 from .constants import (
     CLAUDE_API_TIMEOUT_MS,
     DEFAULT_AUTHOR_TIMEOUT_SECONDS,
@@ -1113,6 +1120,8 @@ class SandboxedCodexAuthorAdapter:
         toolchain_mounts: Sequence[SandboxMount] = (),
         timeout_seconds: float = DEFAULT_AUTHOR_TIMEOUT_SECONDS,
         output_max_bytes: int = DEFAULT_MAX_AGENT_OUTPUT_BYTES,
+        model: str | None = None,
+        effort: str | None = None,
         attempt_sink: AttemptSink | None = None,
         secret_refresh: Callable[[], object] | None = None,
         clock: Clock = time.monotonic,
@@ -1138,6 +1147,14 @@ class SandboxedCodexAuthorAdapter:
         ):
             raise ValueError("output_max_bytes is outside the sandbox protocol bound")
         self._output_max_bytes = output_max_bytes
+        if (model is None) != (effort is None):
+            raise ValueError("Codex rollout attestation requires both model and effort")
+        selection = SanitizedCodexConfig(model=model, effort=effort)
+        self._expected_model = selection.model
+        self._expected_effort = selection.effort
+        self._rollout_thread_id: str | None = None
+        self._rollout_turn_ids: tuple[str, ...] = ()
+        self._rollout_prefix_witness: CodexRolloutPrefixWitness | None = None
         if not callable(clock):
             raise TypeError("clock must be callable")
         if attempt_sink is not None and not callable(attempt_sink):
@@ -1149,6 +1166,32 @@ class SandboxedCodexAuthorAdapter:
         self._clock = clock
 
     def turn(self, request: AuthorRequest) -> AuthorTurn:
+        previous_turn_ids: tuple[str, ...] | None = None
+        previous_prefix_witness: CodexRolloutPrefixWitness | None = None
+        if self._expected_model is not None and self._expected_effort is not None:
+            if request.thread_id is None:
+                if (
+                    self._rollout_thread_id is not None
+                    or self._rollout_turn_ids
+                    or self._rollout_prefix_witness is not None
+                ):
+                    raise fail(
+                        StopReason.AUTHOR_PROCESS_FAILURE,
+                        "Codex rollout state is inconsistent with a first turn",
+                    )
+            elif (
+                self._rollout_thread_id != request.thread_id
+                or not self._rollout_turn_ids
+                or self._rollout_prefix_witness is None
+            ):
+                raise fail(
+                    StopReason.AUTHOR_PROCESS_FAILURE,
+                    "Codex rollout state is inconsistent with exact resume",
+                )
+            else:
+                previous_turn_ids = self._rollout_turn_ids
+                previous_prefix_witness = self._rollout_prefix_witness
+
         # Capture the complete pre-turn credential generation before the CLI
         # can replace it.  Output sinks then refresh the same append-only
         # history after transport, closing the B-to-C declassification gap.
@@ -1189,6 +1232,8 @@ class SandboxedCodexAuthorAdapter:
 
         client = CodexClient(transport)
         result = None
+        rollout_turn_ids: tuple[str, ...] | None = None
+        rollout_prefix_witness: CodexRolloutPrefixWitness | None = None
         client_error: BaseException | None = None
         try:
             if request.thread_id is None:
@@ -1207,6 +1252,19 @@ class SandboxedCodexAuthorAdapter:
                     executable=self._executable,
                     parent_environment=build_codex_parent_environment(),
                     output_max_bytes=self._output_max_bytes,
+                )
+            if self._expected_model is not None and self._expected_effort is not None:
+                (
+                    result,
+                    rollout_turn_ids,
+                    rollout_prefix_witness,
+                ) = attach_codex_rollout_selection(
+                    result,
+                    self._transaction.codex_home,
+                    expected_previous_turn_ids=previous_turn_ids,
+                    expected_prefix_witness=previous_prefix_witness,
+                    expected_model=self._expected_model,
+                    expected_effort=self._expected_effort,
                 )
         except BaseException as error:
             client_error = error
@@ -1260,6 +1318,10 @@ class SandboxedCodexAuthorAdapter:
             "reasoning_output_tokens": result.usage.reasoning_output_tokens,
         }
         self._executor.persist_new_blobs(captured)
+        if rollout_turn_ids is not None:
+            self._rollout_thread_id = result.thread_id
+            self._rollout_turn_ids = rollout_turn_ids
+            self._rollout_prefix_witness = rollout_prefix_witness
         return AuthorTurn(
             candidate=captured.result.candidate,
             thread_id=result.thread_id,

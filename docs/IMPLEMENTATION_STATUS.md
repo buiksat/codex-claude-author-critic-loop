@@ -6,14 +6,15 @@ ran successfully. `partial; live blocked` means deterministic coverage passed bu
 behavioral clause remains unproved. A skip, xfail, simulation, or partial probe is never counted as
 completion.
 
-The post-audit collection contains 629 tests. The portable matrix passed 602 tests with 27
-host/real-CLI tests deselected; the host-marked matrix passed 22 tests with 607 deselected; and the
-complete non-real-CLI matrix passed 624 tests with five real-CLI tests deselected. Two separately
-selected non-model Codex CLI probes and one pinned-Claude canonical-schema probe against a
-process-local fake endpoint passed. One explicitly authorized combined qualification attempted the
-credentialed Codex first turn and Claude critic call; both failed, the Codex resume was not reached,
-and no receipt was written. These counts do not turn the partial or blocked contracts below into
-passed contracts.
+The post-remediation collection contains 674 tests. The portable matrix passed 646 tests with 28
+host/real-CLI tests deselected; the host-marked matrix passed 22 tests with 652 deselected; and the
+complete non-real-CLI matrix passed 668 tests with six real-CLI tests deselected. Two separately
+selected non-model Codex CLI probes and two pinned-Claude schema probes against process-local fake
+endpoints passed. The first explicitly authorized combined qualification finished with 23 passes
+and three failures before Codex resume. After its selector and credential
+remediations, the second exercised the Claude review, Codex first turn, and exact Codex resume, then
+finished with 24 passes and two failures. No receipt was written. These counts do not turn the
+partial or blocked contracts below into passed contracts.
 
 ## Detected environment
 
@@ -26,19 +27,19 @@ passed contracts.
 | Bash | 5.3.x | 5.3.x | compatible |
 | Bubblewrap | upstream 0.11.1; package `0.11.1-1ubuntu0.1`; `/usr/bin/bwrap`, root:root, mode `0755`, SHA-256 `0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0` | exact patched non-setuid build | compatible; provenance and negative probes passed |
 | systemd user manager | systemd 259; user manager running | transient user services on 259 | compatible; lifecycle/resource probes passed |
-| Codex CLI | 0.144.6 | 0.144.6 | version/help and non-model prompt-input probes passed; a paid first-turn attempt failed after `thread.started` while using documented selector `gpt-5.4-codex`, which was absent from both the pinned bundled catalog and the failed transaction's cached catalog; that mismatch is the strongest diagnosis, not a retained raw-error proof; the selector is now bundled `gpt-5.4`, while exact resume remains blocked |
-| Claude Code | 2.1.215 | 2.1.215 | executable and canonical-schema handoff passed a non-model local-endpoint probe; the managed paid critic attempt reached the API but its dedicated token received HTTP 401 and must be rotated |
+| Codex CLI | 0.144.6 | 0.144.6 | version/help and non-model prompt-input probes passed; the first paid attempt used absent selector `gpt-5.4-codex` and failed after `thread.started`; with bundled `gpt-5.4`, the second paid attempt completed first turn and exact same-thread resume but the pinned public JSONL supplied no model/effort facts, so the live node failed before its remaining assertions; the locally passing remediation pairs absence of the pinned public reroute signal with a strictly confined per-thread rollout's resolved request selection, exact lifecycle, and append-only prefix witness, but still needs a live rerun |
+| Claude Code | 2.1.215 | 2.1.215 | executable/schema handoff and one exact schema-correction retry passed two non-model local-endpoint probes without AJV strict warnings; the first managed paid attempt received HTTP 401, then the rotated dedicated token authenticated in the second attempt; that review returned an `LGTM` shape accepted by the old JSON Schema but rejected by the local semantic validator, so the schema and prompt now encode the same verdict invariants and still need a live rerun |
 | Namespace/runtime | user/PID/IPC/UTS/network namespaces, full tmpfs, PID 1 supervisor | required | target-host suite passed |
 
 The repository was clean at implementation start. `PLAN.md` remains the `plan-v1.0` content at
 `6b16d5601b1aad7689d18cbd3802c9244c68444f`, with SHA-256
 `bebccf00360b38e4285f7d06bbaa1e5a3af5c4e0d692b183d1f6a905c67825eb`; it was not edited. The two
 dedicated credential stores are provisioned and passed their local structural production-parser
-checks; no ambient CLI home was imported. The Claude token nevertheless failed remote
-authentication and must be rotated. The reviewed root managed-Claude boundary is installed and
-passed production inspection plus a fake-token, no-network initialization probe. One Codex first
-turn and one Claude critic call were attempted under explicit authorization; both failed, the
-Codex resume was not reached, and no live capability receipt exists.
+checks; no ambient CLI home was imported. The replacement Claude token authenticated during the
+second qualification. The reviewed root managed-Claude boundary is installed and passed production
+inspection plus a fake-token, no-network initialization probe. Across two explicit
+authorizations, the first qualification stopped before Codex resume and the second reached Claude
+plus both Codex turns but failed its two final contracts. No live capability receipt exists.
 
 ## Phase checklist
 
@@ -57,8 +58,11 @@ Codex resume was not reached, and no live capability receipt exists.
   strict-mypy gates could not run.
 - [ ] Phase 4: pinned real-CLI integration — both adapters, exact argv/config parsing, non-model
   Codex probes, pinned-Claude canonical-schema compatibility, and the receipt gate are implemented;
-  acceptance 8/33/49/65/66 still requires those two paid smoke-test nodes to pass in one explicitly
-  authorized combined host/live pytest session.
+  the second combined qualification reached both paid smoke-test nodes and all three intended
+  model turns but exposed one Claude schema/semantic mismatch and one Codex selection-evidence gap.
+  Both remediations now pass the complete local matrices and their non-model CLI probes; acceptance
+  8/33/49/65/66 still requires the nodes to pass in one newly authorized combined host/live pytest
+  session.
 - [ ] Phase 5: serial loop and usability — `run`, `status`, and `show`, strict configuration,
   confirmation, artifacts, production receipt enforcement, and wheel metadata are covered with
   deterministic adapters. The reviewed wheel installed successfully into a fresh pipx virtual
@@ -103,8 +107,8 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 29 | Descendant cleanup | both `test_029_*` cases in `tests/host/test_service_cleanup.py` and `tests/integration/test_sandbox_init.py::test_029_setsid_descendant_is_killed_and_reaped_before_export` | passed |
 | 30 | Process introspection | all four `test_030_*` cases in `tests/host/test_process_isolation.py` | passed |
 | 31 | Sanitized Codex home | all `test_031_*` cases in `tests/integration/test_codex_client.py` | passed |
-| 32 | Codex auth isolation | all `test_032_*` cases in `tests/integration/test_credentials.py`; the generated-command read/environment clause is also asserted by the still-nonpassing live `test_033_065_066_*` node | partial; live blocked |
-| 33 | Custom profile | `tests/real_cli/test_live_codex_acceptance.py::test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation` | blocked |
+| 32 | Codex auth isolation | all `test_032_*` cases in `tests/integration/test_credentials.py`; the generated-command read/environment clause is also asserted by the still-nonpassing live `test_033_065_066_*` node, whose second attempt reached both turns before failing on absent public model/effort facts | partial; live blocked |
+| 33 | Custom profile | `tests/real_cli/test_live_codex_acceptance.py::test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation`; the second attempt completed the first and resumed calls but stopped at the selection-evidence assertion before the node's remaining profile assertions, and the local private-rollout remediation has not run live | blocked |
 | 34 | Explicit session routing | both `test_034_*` cases in `tests/integration/test_codex_client.py` | passed |
 | 35 | No interrupted resume | `tests/integration/test_runner.py::test_035_interruption_preserves_finish_evidence_and_new_run_starts_fresh` | passed |
 | 36 | Credential crash recovery | all `test_036_*` cases in `tests/integration/test_credentials.py` | passed |
@@ -120,10 +124,10 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 46 | Special files | all `test_046_*` cases in `tests/adversarial/test_filesystem.py` | passed |
 | 47 | Arbitrary path bytes | `tests/unit/test_manifests.py::test_047_arbitrary_path_bytes_round_trip_losslessly` and all `test_047_*` cases in `tests/adversarial/test_openat2.py` | passed |
 | 48 | Critic isolation | `tests/integration/test_claude_client.py::test_048_critic_invocation_is_tool_disabled_and_fresh` and `tests/integration/test_runtime_adapters.py::test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts` | passed |
-| 49 | Managed Claude boundary | `tests/unit/test_claude_managed_policy.py` proves the closed policy/helper contract and child-environment attestation behavior; `tests/integration/test_runtime_adapters.py` and `tests/integration/test_workflow.py` prove immutable mount, receipt, and production propagation; `tests/real_cli/test_live_claude_managed_boundary.py::test_049_live_managed_claude_child_is_scrubbed_confined_and_attested` was attempted but returned HTTP 401 before its assertions could pass | partial; live blocked |
+| 49 | Managed Claude boundary | `tests/unit/test_claude_managed_policy.py` proves the closed policy/helper contract and child-environment attestation behavior; `tests/integration/test_runtime_adapters.py` and `tests/integration/test_workflow.py` prove immutable mount, receipt, and production propagation; the first live attempt returned HTTP 401, while the second authenticated but its review failed local semantics before the node's managed-child assertions; the local schema/prompt remediation has not run live | partial; live blocked |
 | 50 | Hostile Claude project config | `tests/integration/test_claude_client.py::test_050_hostile_claude_project_config_is_not_in_environment_or_cwd` | passed |
-| 51 | Retry budget | all `test_051_*` cases in `tests/integration/test_claude_client.py` prove exact environment settings, bounded simulated schema retry, and typed exhaustion; `tests/real_cli/test_claude_cli.py::test_pinned_claude_accepts_canonical_schema_without_nonessential_sidecalls` proves the initial canonical-schema handoff to a process-local fake endpoint, but pinned Claude API/schema retry behavior was not exercised | partial; live behavior unproved |
-| 52 | Schema semantics | all `test_052_*` cases in `tests/unit/test_schemas.py`, `tests/unit/test_schema_documents.py::test_packaged_critic_schema_matches_operational_schema`, and the separately run non-model pinned-Claude canonical-schema probe | passed |
+| 51 | Retry budget | all `test_051_*` cases in `tests/integration/test_claude_client.py` prove exact environment settings, bounded schema retry, and typed exhaustion; the two process-local pinned-CLI probes prove canonical-schema handoff and that a whitespace-invalid `BLOCKED` result causes exactly one correction request before a canonical success, without AJV strict warnings; pinned `CLAUDE_CODE_MAX_RETRIES=2` API-failure retry behavior remains unproved | partial; live API-retry behavior unproved |
+| 52 | Schema semantics | all `test_052_*` cases in `tests/unit/test_schemas.py`, the schema-document contradiction/parity cases, and both separately run non-model pinned-Claude schema probes passed; the operational and packaged schema plus critic prompt encode the local validator's exact cross-verdict invariants, including a non-whitespace BLOCKED reason | passed |
 | 53 | Bundle budgets | `tests/unit/test_prompts.py::test_053_bundle_budgets`, `test_053_changed_file_limit_withholds_the_complete_semantic_delta`, `test_053_findings_limit_fails_before_bundle_construction`, `test_053_task_field_limit_fails_before_bundle_construction`, and `test_053_byte_and_estimated_input_limits_are_independent` cover file, finding, field, byte, estimated-token, and output-reserve limits | passed |
 | 54 | Review limitation | `tests/unit/test_prompts.py::test_054_review_limitation_recorded` and `tests/unit/test_prompts.py::test_054_configured_context_obeys_sensitive_path_rules` | passed |
 | 55 | Hostile return path | `tests/adversarial/test_prompts.py::test_055_hostile_return_path` | passed |
@@ -135,15 +139,15 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 61 | Source isolation | `tests/integration/test_git_source.py::test_061_dirty_staged_untracked_and_ignored_checkout_state_is_excluded` | passed |
 | 62 | No publication | `tests/integration/test_runner.py::test_062_runner_has_no_publication_side_effect_and_prompts_prohibit_it` | passed |
 | 63 | Stable exits | `tests/unit/test_errors.py::test_063_stable_exits` exhaustively compares every `StopReason` member with its documented stable category | passed |
-| 64 | Model record | `tests/integration/test_runner.py::test_064_exact_requested_model_and_effort_must_match_observed_facts` and `tests/unit/test_schema_documents.py::test_064_run_record_contains_requested_and_observed_models_effort_usage_and_cost` | passed |
-| 65 | Git-less first turn and resume | `tests/real_cli/test_live_codex_acceptance.py::test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation` | blocked |
-| 66 | Project-instruction isolation | `tests/real_cli/test_codex_cli.py::test_066_pinned_prompt_input_probe_ignores_additional_root_instructions` passed; combined first/resume live node remains | blocked |
+| 64 | Model record | `tests/integration/test_runner.py::test_064_exact_requested_model_and_effort_must_match_observed_facts` and `tests/unit/test_schema_documents.py::test_064_run_record_contains_requested_and_observed_models_effort_usage_and_cost` passed; because pinned Codex public JSONL omits selection facts, the adapter now rejects the pinned public reroute signal, confined-reads the exact thread's private rollout, validates its frozen item set and task lifecycle, requires an append-only prior prefix plus exactly one new turn on resume, and matches its resolved model/effort to the request; all added regressions passed | passed |
+| 65 | Git-less first turn and resume | `tests/real_cli/test_live_codex_acceptance.py::test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation`; the second attempt completed both model calls, returned the expected response markers, and resumed the exact thread, but the node then failed on absent public selection facts before the local private-rollout remediation | blocked |
+| 66 | Project-instruction isolation | `tests/real_cli/test_codex_cli.py::test_066_pinned_prompt_input_probe_ignores_additional_root_instructions` passed; the second combined first/resume attempt stopped at selection evidence before its final marker/profile-isolation assertions, so the combined node remains blocked | blocked |
 | 67 | Auth refresh persistence and serialization | both `test_067_*` cases in `tests/integration/test_credentials.py` plus `tests/integration/test_runtime_adapters.py::test_067_external_fake_refresh_is_reconciled_before_adapter_returns` | passed |
 | 68 | Withheld semantic delta | `tests/unit/test_prompts.py` (`test_068_*`) and both counterfactual `test_068_*` cases in `tests/integration/test_runner.py` | passed |
 | 69 | Validation-log exfiltration | `tests/adversarial/test_declassify.py::test_069_validation_log_exfiltration` and the exact/split/base64/lowercase-hex/uppercase-hex parameterizations of `tests/integration/test_runner.py::test_069_secret_forms_never_cross_validation_to_either_agent` | passed |
 | 70 | Diagnostic patch correctness | `tests/unit/test_diagnostic_patch.py::test_070_projection_exactly_covers_all_manifest_change_shapes_and_hashes` | passed |
 | 71 | Transient-service lifecycle | `tests/host/test_service.py::test_071_transient_service_lifecycle` | passed |
-| 72 | Claude automation token | all `test_072_*` cases in `tests/integration/test_credentials.py` and `tests/integration/test_runtime_adapters.py::test_072_claude_token_encoding_cannot_enter_retained_control_output`; real managed-child scrubbing is asserted only by the still-nonpassing live gate 49 | partial; live blocked |
+| 72 | Claude automation token | all `test_072_*` cases in `tests/integration/test_credentials.py` and `tests/integration/test_runtime_adapters.py::test_072_claude_token_encoding_cannot_enter_retained_control_output`; the rotated token authenticated in the second live attempt, but real managed-child scrubbing is asserted only after the still-unreached assertions in live gate 49 | partial; live blocked |
 
 The matrix therefore records 64 passed contracts, four partial contracts, and four blocked
 contracts. Partial and blocked contracts are not completion.
@@ -159,7 +163,16 @@ behavior probe. Local simulation is not treated as completion.
   versioned JSON documents at runtime; the development suite additionally validates each document
   against its declared dialect. The critic contract is Draft 7 because the pinned Claude 2.1.215
   CLI rejects a Draft 2020-12 metaschema before launch; all other packaged schemas remain Draft
-  2020-12.
+  2020-12. The critic schema and prompt now encode the same LGTM/REVISE/BLOCKED cross-field
+  invariants as the total semantic parser, so an incoherent verdict is eligible for Claude's one
+  bounded schema-correction attempt instead of reaching local semantic validation.
+- Pinned Codex 0.144.6 does not publish positive model/effort facts in its public exec JSONL. The
+  adapter rejects that stream's exact server-reroute error signal, then binds the successful thread
+  to one private per-thread rollout. Descriptor-confined, byte/event-bounded traversal accepts only
+  the pinned durable item types and complete task lifecycles; it extracts the client-resolved
+  model/effort, requires the prior rollout bytes to remain an exact SHA-256-witnessed prefix plus
+  one new turn on resume, and rejects disagreement with the request. Raw rollout contents and the
+  in-memory prefix witness are not copied into retained run evidence.
 - Canonical manifest and blob hashes use SHA-256. Canonical manifest bytes use a versioned,
   length-prefixed binary encoding over raw path and symlink-target bytes. JSON artifacts retain
   base64 identity plus deterministic safe display strings.
@@ -201,8 +214,11 @@ The receipt-bound live proof requires deliberate operator action:
 1. Provision the two private credential identifiers and exact install roots described in `README.md`.
 2. Have an administrator install and dry-check the reviewed Claude managed policy/helper exactly as
    described in `README.md`; this does not load credentials or authorize model traffic.
-3. Review the displayed accounts, exact models/efforts, expected two Codex calls plus one Claude
-   call, timeouts, and cost; then set both `AGENT_LOOP_CONFIRM_PAID_*` variables.
+3. Review the displayed accounts, exact models/efforts, expected two Codex model calls, and one
+   Claude CLI invocation. The Claude invocation may make one initial model request plus at most one
+   schema-correction model request; its separate `CLAUDE_CODE_MAX_RETRIES=2` API retry budget can
+   retry API attempts. Review the timeouts and worst-case cost, then set both
+   `AGENT_LOOP_CONFIRM_PAID_*` variables.
 4. Export every exact selector in the README and run this single command on the frozen host:
 
    ```bash
@@ -230,25 +246,26 @@ mypy src tests
 
 The executable-fake Phase 3 matrix covers the required behavior families; fine-grained invalid
 Claude schema fields are enforced compositionally by the same local parser/schema layer rather than
-claimed as one fake process per rule. Acceptance 51 still needs an explicit pinned-Claude
-retry-behavior proof before its simulated coverage can be promoted to passed. The fresh pipx wheel
-installation exposes and parses exactly `run`, `status`, and `show`, and its installed Python-source
-closure matches the reviewed source closure.
+claimed as one fake process per rule. Acceptance 51's pinned schema-correction retry is now proven
+against a process-local endpoint; its separate API-failure retry behavior remains unproved. The
+fresh pipx wheel installation exposes and parses exactly `run`, `status`, and `show`, and its
+installed Python-source closure matches the reviewed source closure.
 
 ## Check log
 
 | Date | Command | Result |
 |---|---|---|
 | 2026-07-19 | environment/version/provenance inspection | passed; exact values recorded above |
-| 2026-07-20 | `python3.14 -m pytest --collect-only -q` | passed; 629 tests collected |
-| 2026-07-20 | `python3.14 -m pytest -q -m 'not host and not real_cli'` | passed; 602 passed, 27 deselected |
-| 2026-07-20 | `python3.14 -m pytest -q -m host` | passed; 22 passed, 607 deselected |
-| 2026-07-20 | `python3.14 -m pytest -q tests/host` | passed; 21 passed |
+| 2026-07-20 | `python3.14 -m pytest --collect-only -q -p no:cacheprovider` | passed; 674 tests collected |
+| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider -m 'not host and not real_cli'` | passed; 646 passed, 28 deselected |
+| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider -m host` | passed; 22 passed, 652 deselected |
+| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider tests/host` | passed; 21 passed |
 | 2026-07-19 | `AGENT_LOOP_ALLOW_LIVE=1 AGENT_LOOP_CODEX_CREDENTIAL_ID=nonmodel-probe AGENT_LOOP_CODEX_PATH=/home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js python3.14 -m pytest -q tests/real_cli/test_codex_cli.py::test_pinned_codex_non_model_version_and_help_capabilities tests/real_cli/test_codex_cli.py::test_066_pinned_prompt_input_probe_ignores_additional_root_instructions` | passed; 2 passed |
-| 2026-07-20 | `AGENT_LOOP_ALLOW_LIVE=1 AGENT_LOOP_CLAUDE_INSTALL_ROOT=/home/bahram/.local/share/claude/versions AGENT_LOOP_CLAUDE_INSTALL_RELATIVE=2.1.215 python3.14 -m pytest -q tests/real_cli/test_claude_cli.py::test_pinned_claude_accepts_canonical_schema_without_nonessential_sidecalls` | passed; 1 passed against a process-local fake endpoint, with no credential, external network, or model call |
-| 2026-07-20 | `python3.14 -m pytest -q -m 'not real_cli'` | passed; 624 passed, 5 deselected |
+| 2026-07-20 | selected process-local pinned-Claude canonical-schema and one-correction-retry probes | passed; 2 passed with dummy local credentials and no external network or model call |
+| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider -m 'not real_cli'` | passed; 668 passed, 6 deselected |
 | 2026-07-20 | `python3.14 -m compileall -q src tests` | passed |
 | 2026-07-20 | explicitly authorized combined `tests/host tests/real_cli` qualification | failed; 23 passed and 3 failed: host preflight followed a mutable Claude launcher at 2.1.216, Claude returned HTTP 401, and Codex exited 1 after `thread.started`; resume was not reached and no receipt was written |
+| 2026-07-20 | second explicitly authorized combined `tests/host tests/real_cli` qualification | failed; 24 passed and 2 failed: the managed Claude call authenticated but returned an `LGTM` shape accepted by the old schema and rejected by local verdict semantics; Codex first turn and exact same-thread resume both completed, but the pinned public JSONL omitted model/effort selection facts; no receipt was written |
 | 2026-07-20 | pinned Codex 0.144.6 `debug models --bundled` in an isolated empty home | passed without credentials, network refresh, or model traffic; `gpt-5.4-codex` is absent and `gpt-5.4` is listed with `high` reasoning support |
 | 2026-07-20 | `bash support/managed-claude-boundary/install.sh --check` | passed; static helper and exact policy/input probes only, with no `sudo`, system write, credential access, or model call |
 | 2026-07-20 | `bash support/managed-claude-boundary/install.sh` | passed with operator-entered sudo authentication; installed exact root-owned policy/helper modes `0444`/`0555`, and production inspection passed |
@@ -257,6 +274,8 @@ closure matches the reviewed source closure.
 | 2026-07-20 | `PIP_NO_INDEX=1 python3.14 -m pip wheel . --no-cache-dir --no-build-isolation --no-deps --wheel-dir dist` | passed; wheel built offline and packaged the frozen plan, status, schemas, managed-boundary sources, and console entry point |
 | 2026-07-20 | `PIP_NO_INDEX=1 pipx install dist/agent_loop-1.0.0-py3-none-any.whl --python /usr/bin/python3.14` plus installed/source closure and subcommand checks | passed in a fresh Python 3.14.4 pipx virtual environment; installed Python-source closure matched source and exactly `run`, `status`, `show` parsed |
 
-The credentialed Codex/Claude smoke nodes were attempted once but did not pass. Their blocked
-status remains intentional until the Claude token is rotated, the corrected selectors and
-diagnostics are reviewed, and another combined run is explicitly authorized.
+The credentialed Codex/Claude smoke nodes were attempted twice but did not pass. The replacement
+Claude token authenticated and the corrected Codex selector completed both turns in the second
+attempt. The reviewed remediations now pass every local matrix and their non-model pinned-CLI
+probes; blocked live status remains intentional until another combined run is explicitly
+authorized and passes.

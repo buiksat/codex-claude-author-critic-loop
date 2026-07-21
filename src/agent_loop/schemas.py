@@ -110,6 +110,49 @@ def critic_schema_document() -> dict[str, Any]:
             },
         },
     }
+    verdict_invariants = [
+        {
+            "if": {
+                "properties": {"verdict": {"const": "LGTM"}},
+                "required": ["verdict"],
+            },
+            "then": {
+                "properties": {
+                    "blocked_reason": {"type": "null"},
+                    "blocking_findings": {"type": "array", "maxItems": 0},
+                }
+            },
+        },
+        {
+            "if": {
+                "properties": {"verdict": {"const": "REVISE"}},
+                "required": ["verdict"],
+            },
+            "then": {
+                "properties": {
+                    "blocked_reason": {"type": "null"},
+                    "blocking_findings": {"type": "array", "minItems": 1},
+                }
+            },
+        },
+        {
+            "if": {
+                "properties": {"verdict": {"const": "BLOCKED"}},
+                "required": ["verdict"],
+            },
+            "then": {
+                "properties": {
+                    "blocked_reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": DEFAULT_MAX_FIELD_BYTES,
+                        "pattern": r"\S",
+                    },
+                    "blocking_findings": {"type": "array", "maxItems": 0},
+                }
+            },
+        },
+    ]
     return {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "$id": "https://agent-loop.invalid/schemas/critic-v1.schema.json",
@@ -144,6 +187,7 @@ def critic_schema_document() -> dict[str, Any]:
                 "items": {"$ref": "#/definitions/finding"},
             },
         },
+        "allOf": verdict_invariants,
         "definitions": {"finding": finding},
     }
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -13,8 +12,9 @@ from agent_loop.claude_managed_policy import (
     MANAGED_CLAUDE_POLICY_TARGET,
 )
 from agent_loop.credentials import load_claude_setup_token
+from agent_loop.declassify import ValidationCriticEvidence
 from agent_loop.manifests import SubjectManifest
-from agent_loop.prompts import ReviewBundle
+from agent_loop.prompts import ReviewBundle, build_review_bundle
 from agent_loop.runner import CriticRequest
 from agent_loop.runtime_adapters import SandboxExecutor, SandboxedClaudeCriticAdapter
 from agent_loop.schemas import ApprovalContext
@@ -33,25 +33,19 @@ from tests.real_cli.live_support import (
 pytestmark = pytest.mark.real_cli
 
 
-def _bundle() -> ReviewBundle:
-    document = {
-        "bundle_schema_version": 1,
-        "task": "Managed Claude boundary smoke test; no source changes are present.",
-        "semantic_delta_complete": True,
-        "semantic_changes": [],
-        "validation": {"all_passed": True, "subject_mutated": False},
-        "protected_patterns": [],
-        "opaque_nonsemantic_patterns": [],
-        "prior_findings_ledger": [],
-    }
-    encoded = json.dumps(
-        document,
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii")
-    return ReviewBundle(document, encoded, len(encoded), "a" * 64)
+def _bundle(blobs: ContentAddressedBlobStore) -> ReviewBundle:
+    subject = SubjectManifest.empty()
+    return build_review_bundle(
+        task="Managed Claude boundary smoke test; no source changes are present.",
+        base=subject,
+        subject=subject,
+        semantic_changes=(),
+        opaque_changes=(),
+        blobs=blobs,
+        validation=ValidationCriticEvidence(1, subject.fingerprint, True, ()),
+        protected_patterns=(),
+        opaque_patterns=(),
+    )
 
 
 def test_049_live_managed_claude_child_is_scrubbed_confined_and_attested(
@@ -88,7 +82,7 @@ def test_049_live_managed_claude_child_is_scrubbed_confined_and_attested(
         turn = adapter.review(
             CriticRequest(
                 1,
-                _bundle(),
+                _bundle(blobs),
                 ApprovalContext(True, True, True),
                 time.monotonic() + 420,
             )
