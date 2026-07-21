@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Callable, Mapping
@@ -15,11 +16,12 @@ from .constants import (
     CLAUDE_STRUCTURED_OUTPUT_RETRIES,
     DEFAULT_MAX_AGENT_OUTPUT_BYTES,
 )
-from .errors import StopReason, fail
+from .errors import AgentLoopError, StopReason, fail
 from .prompts import CRITIC_PROMPT, ReviewBundle
 from .schemas import (
     ApprovalContext,
     CriticReview,
+    critic_schema_document,
     critic_schema_json,
     parse_critic_envelope,
     parse_json_object,
@@ -30,6 +32,18 @@ ClaudeTransport = Callable[["ClaudeInvocation", float, int], BoundedProcessResul
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EFFORT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_API_REQUEST_DETAIL_LINE = re.compile(
+    rb"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z "
+    rb"\[VERBOSE\] \[API REQUEST DETAIL\] (?P<payload>\{.*\})$"
+)
+_API_REQUEST_DETAIL_MARKER = b"[API REQUEST DETAIL]"
+_API_REQUEST_DETAIL_FIELDS = frozenset(
+    {"model", "thinking", "output_config", "temperature", "betas", "anthropic_beta"}
+)
+_MAX_API_REQUEST_DETAIL_BYTES = 128 * 1_024
+_MAX_API_REQUEST_DETAILS = (CLAUDE_API_RETRIES + 1) * (
+    CLAUDE_STRUCTURED_OUTPUT_RETRIES + 1
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +71,8 @@ class ClaudeReviewResult:
     envelope: dict[str, object]
     usage: ClaudeUsage
     completed_at: float
+    observed_model: str | None
+    observed_effort: str | None
 
 
 def build_claude_argv(
@@ -90,6 +106,9 @@ def build_claude_argv(
         "mcp__*",
         "--max-turns",
         str(CLAUDE_MAX_TURNS),
+        "--debug",
+        "api",
+        "--debug-to-stderr",
         "--output-format",
         "json",
         "--json-schema",
@@ -121,6 +140,8 @@ def complete_claude_environment(parent: Mapping[str, str]) -> dict[str, str]:
             "CLAUDE_CODE_MAX_RETRIES": str(CLAUDE_API_RETRIES),
             "API_TIMEOUT_MS": str(CLAUDE_API_TIMEOUT_MS),
             "MAX_STRUCTURED_OUTPUT_RETRIES": str(CLAUDE_STRUCTURED_OUTPUT_RETRIES),
+            "CLAUDE_CODE_DEBUG_LOG_LEVEL": "verbose",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
     )
     if "CLAUDE_CODE_RETRY_WATCHDOG" in result:
@@ -165,6 +186,106 @@ def _classify_envelope_failure(data: bytes) -> None:
         )
     if envelope.get("is_error") is True or envelope.get("type") == "error":
         raise fail(StopReason.CRITIC_PROCESS_FAILURE, "Claude returned an error envelope")
+
+
+def _duplicate_rejecting_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate property {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite(token: str) -> None:
+    raise ValueError(f"non-finite number {token}")
+
+
+def _selection_failure(detail: str) -> AgentLoopError:
+    return fail(StopReason.SANDBOX_SETUP_FAILURE, detail)
+
+
+def _parse_api_request_selection(
+    stderr: bytes,
+    *,
+    requested_model: str | None,
+    requested_effort: str | None,
+) -> tuple[str | None, str | None]:
+    """Extract pinned-CLI request selection evidence from safe verbose diagnostics."""
+
+    observed_model: str | None = None
+    observed_effort: str | None = None
+    request_count = 0
+    for line in stderr.splitlines():
+        if _API_REQUEST_DETAIL_MARKER not in line:
+            continue
+        if len(line) > _MAX_API_REQUEST_DETAIL_BYTES:
+            raise _selection_failure("Claude API request diagnostic exceeded its byte limit")
+        match = _API_REQUEST_DETAIL_LINE.fullmatch(line)
+        if match is None:
+            raise _selection_failure("Claude API request diagnostic had an invalid framing")
+        try:
+            detail = json.loads(
+                match.group("payload").decode("utf-8", "strict"),
+                object_pairs_hook=_duplicate_rejecting_object,
+                parse_constant=_reject_non_finite,
+            )
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise _selection_failure("Claude API request diagnostic was invalid JSON") from exc
+        if not isinstance(detail, dict):
+            raise _selection_failure("Claude API request diagnostic was not an object")
+        if not set(detail).issubset(_API_REQUEST_DETAIL_FIELDS):
+            raise _selection_failure("Claude API request diagnostic had unknown fields")
+
+        raw_model = detail.get("model")
+        output_config = detail.get("output_config")
+        if (
+            not isinstance(raw_model, str)
+            or _MODEL_ID.fullmatch(raw_model) is None
+            or not isinstance(output_config, dict)
+            or not set(output_config).issubset({"effort", "format"})
+        ):
+            raise _selection_failure("Claude API request diagnostic had invalid selection fields")
+        output_format = output_config.get("format")
+        if output_format is not None:
+            try:
+                format_matches = output_format == {
+                    "type": "json_schema",
+                    "schema": critic_schema_document(),
+                }
+            except RecursionError:
+                format_matches = False
+            if not format_matches:
+                raise _selection_failure(
+                    "Claude API request diagnostic had an invalid structured-output format"
+                )
+        raw_effort = output_config.get("effort")
+        if raw_effort is not None and (
+            not isinstance(raw_effort, str) or _EFFORT.fullmatch(raw_effort) is None
+        ):
+            raise _selection_failure("Claude API request diagnostic had invalid effort")
+
+        if requested_model is not None and raw_model != requested_model:
+            raise _selection_failure("Claude API request used a different model than requested")
+        if requested_effort is not None and raw_effort != requested_effort:
+            raise _selection_failure("Claude API request used a different effort than requested")
+        if observed_model is not None and raw_model != observed_model:
+            raise _selection_failure("Claude API retries used conflicting models")
+        if request_count and raw_effort != observed_effort:
+            raise _selection_failure("Claude API retries used conflicting efforts")
+
+        observed_model = raw_model
+        observed_effort = raw_effort
+        request_count += 1
+        if request_count > _MAX_API_REQUEST_DETAILS:
+            raise _selection_failure(
+                "Claude API request diagnostics exceeded the bounded retry budget"
+            )
+
+    if requested_model is not None or requested_effort is not None:
+        if request_count == 0:
+            raise _selection_failure("Claude emitted no API request selection diagnostic")
+    return observed_model, observed_effort
 
 
 class ClaudeClient:
@@ -220,9 +341,16 @@ class ClaudeClient:
         model_usage_raw = envelope.get("modelUsage", {})
         if not isinstance(model_usage_raw, dict) or len(model_usage_raw) > 64:
             raise fail(StopReason.INVALID_STRUCTURED_OUTPUT, "invalid Claude model-usage metadata")
+        observed_model, observed_effort = _parse_api_request_selection(
+            result.stderr,
+            requested_model=model,
+            requested_effort=effort,
+        )
         return ClaudeReviewResult(
             review=review,
             envelope=envelope,
             usage=ClaudeUsage(cost, model_usage_raw),
             completed_at=result.completed_at,
+            observed_model=observed_model,
+            observed_effort=observed_effort,
         )

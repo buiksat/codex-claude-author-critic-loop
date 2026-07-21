@@ -35,9 +35,9 @@ if TYPE_CHECKING:
     from .preflight import EnvironmentReport, TrustedExecutable
 
 
-CAPABILITY_RECEIPT_SCHEMA_VERSION = 1
+CAPABILITY_RECEIPT_SCHEMA_VERSION = 2
 CAPABILITY_RECEIPT_TYPE = "agent-loop.live-capabilities"
-CAPABILITY_RECEIPT_RELATIVE_PATH = Path("agent-loop/capabilities/live-v1.json")
+CAPABILITY_RECEIPT_RELATIVE_PATH = Path("agent-loop/capabilities/live-v2.json")
 MAX_CAPABILITY_RECEIPT_BYTES = 64 * 1024
 MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS = 7 * 24 * 60 * 60
 
@@ -93,6 +93,19 @@ def _sha256(value: object, *, field: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         _invalid(f"{field} must be a lowercase SHA-256 digest")
     return value
+
+
+def _absolute_path(value: object, *, field: str) -> str:
+    text = _safe_text(value, field=field, max_bytes=4096)
+    if (
+        not text.startswith("/")
+        or text == "/"
+        or text.startswith("//")
+        or text.endswith("/")
+        or os.path.normpath(text) != text
+    ):
+        _invalid(f"{field} must be a normalized absolute non-root path")
+    return text
 
 
 def _true(value: object, *, field: str) -> bool:
@@ -291,12 +304,57 @@ class ToolCapabilityBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedClaudeBoundaryCapabilityBinding:
+    """Exact managed-policy and helper closure proven by the Claude live gate."""
+
+    policy_path: str
+    helper_path: str
+    policy_sha256: str
+    helper_sha256: str
+    probe_protocol: str
+    probe_id: str
+
+    def __post_init__(self) -> None:
+        _absolute_path(self.policy_path, field="managed_claude_boundary.policy_path")
+        _absolute_path(self.helper_path, field="managed_claude_boundary.helper_path")
+        _sha256(
+            self.policy_sha256,
+            field="managed_claude_boundary.policy_sha256",
+        )
+        _sha256(
+            self.helper_sha256,
+            field="managed_claude_boundary.helper_sha256",
+        )
+        _matching_text(
+            self.probe_protocol,
+            _IDENTIFIER,
+            field="managed_claude_boundary.probe_protocol",
+        )
+        _matching_text(
+            self.probe_id,
+            _IDENTIFIER,
+            field="managed_claude_boundary.probe_id",
+        )
+
+    def to_json_obj(self) -> dict[str, object]:
+        return {
+            "policy_path": self.policy_path,
+            "helper_path": self.helper_path,
+            "policy_sha256": self.policy_sha256,
+            "helper_sha256": self.helper_sha256,
+            "probe_protocol": self.probe_protocol,
+            "probe_id": self.probe_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LiveCapabilityBinding:
     """Everything that must match before a live receipt can authorize a run."""
 
     host: HostCapabilityBinding
     codex: ToolCapabilityBinding
     claude: ToolCapabilityBinding
+    managed_claude_boundary: ManagedClaudeBoundaryCapabilityBinding
 
     def __post_init__(self) -> None:
         if not isinstance(self.host, HostCapabilityBinding):
@@ -305,6 +363,14 @@ class LiveCapabilityBinding:
             raise TypeError("codex must be a ToolCapabilityBinding")
         if not isinstance(self.claude, ToolCapabilityBinding):
             raise TypeError("claude must be a ToolCapabilityBinding")
+        if not isinstance(
+            self.managed_claude_boundary,
+            ManagedClaudeBoundaryCapabilityBinding,
+        ):
+            raise TypeError(
+                "managed_claude_boundary must be a "
+                "ManagedClaudeBoundaryCapabilityBinding"
+            )
 
     @classmethod
     def from_environment_report(
@@ -317,6 +383,7 @@ class LiveCapabilityBinding:
         author_effort: str,
         critic_model: str,
         critic_effort: str,
+        managed_claude_boundary: ManagedClaudeBoundaryCapabilityBinding,
         codex_install_closure_sha256: str | None = None,
         claude_install_closure_sha256: str | None = None,
         runtime_closure_sha256: str,
@@ -342,6 +409,7 @@ class LiveCapabilityBinding:
                 requested_effort=critic_effort,
                 install_closure_sha256=claude_install_closure_sha256,
             ),
+            managed_claude_boundary=managed_claude_boundary,
         )
 
     def to_json_obj(self) -> dict[str, object]:
@@ -351,6 +419,7 @@ class LiveCapabilityBinding:
                 "codex": self.codex.to_json_obj(),
                 "claude": self.claude.to_json_obj(),
             },
+            "managed_claude_boundary": self.managed_claude_boundary.to_json_obj(),
         }
 
 
@@ -433,6 +502,14 @@ _TOOL_REQUIRED_KEYS = {
     "requested_model",
     "requested_effort",
 }
+_MANAGED_CLAUDE_BOUNDARY_KEYS = {
+    "policy_path",
+    "helper_path",
+    "policy_sha256",
+    "helper_sha256",
+    "probe_protocol",
+    "probe_id",
+}
 _TOP_LEVEL_KEYS = {
     "receipt_type",
     "schema_version",
@@ -442,6 +519,7 @@ _TOP_LEVEL_KEYS = {
     "acceptance_gates",
     "host",
     "tools",
+    "managed_claude_boundary",
 }
 
 
@@ -490,6 +568,41 @@ def _parse_tool(value: object, *, field: str) -> ToolCapabilityBinding:
             value["requested_effort"],
             _EFFORT,
             field=f"{field}.requested_effort",
+        ),
+    )
+
+
+def _parse_managed_claude_boundary(
+    value: object,
+) -> ManagedClaudeBoundaryCapabilityBinding:
+    field = "managed_claude_boundary"
+    boundary = _closed_object(value, _MANAGED_CLAUDE_BOUNDARY_KEYS, field=field)
+    return ManagedClaudeBoundaryCapabilityBinding(
+        policy_path=_absolute_path(
+            boundary["policy_path"],
+            field=f"{field}.policy_path",
+        ),
+        helper_path=_absolute_path(
+            boundary["helper_path"],
+            field=f"{field}.helper_path",
+        ),
+        policy_sha256=_sha256(
+            boundary["policy_sha256"],
+            field=f"{field}.policy_sha256",
+        ),
+        helper_sha256=_sha256(
+            boundary["helper_sha256"],
+            field=f"{field}.helper_sha256",
+        ),
+        probe_protocol=_matching_text(
+            boundary["probe_protocol"],
+            _IDENTIFIER,
+            field=f"{field}.probe_protocol",
+        ),
+        probe_id=_matching_text(
+            boundary["probe_id"],
+            _IDENTIFIER,
+            field=f"{field}.probe_id",
         ),
     )
 
@@ -571,6 +684,9 @@ def _parse_receipt(data: bytes) -> LiveCapabilityReceipt:
             ),
             codex=_parse_tool(tools["codex"], field="tools.codex"),
             claude=_parse_tool(tools["claude"], field="tools.claude"),
+            managed_claude_boundary=_parse_managed_claude_boundary(
+                top["managed_claude_boundary"]
+            ),
         ),
         issued_at_unix=_timestamp(top["issued_at_unix"], field="issued_at_unix"),
         expires_at_unix=_timestamp(top["expires_at_unix"], field="expires_at_unix"),

@@ -100,6 +100,8 @@ _ALLOWED_ENV = frozenset(
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
         "CLAUDE_CODE_MAX_RETRIES",
+        "CLAUDE_CODE_DEBUG_LOG_LEVEL",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         "API_TIMEOUT_MS",
         "MAX_STRUCTURED_OUTPUT_RETRIES",
         "CLAUDE_CONFIG_DIR",
@@ -116,6 +118,8 @@ _FIXED_ENV_VALUES = {
     "CODEX_HOME": frozenset({"/control/codex-home"}),
     "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": frozenset({"1"}),
     "CLAUDE_CODE_MAX_RETRIES": frozenset({"2"}),
+    "CLAUDE_CODE_DEBUG_LOG_LEVEL": frozenset({"verbose"}),
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": frozenset({"1"}),
     "API_TIMEOUT_MS": frozenset({"300000"}),
     "MAX_STRUCTURED_OUTPUT_RETRIES": frozenset({"1"}),
     "CLAUDE_CONFIG_DIR": frozenset({"/control/claude-home"}),
@@ -497,8 +501,10 @@ def parse_request(data: bytes) -> SandboxRequest:
     argv: list[str] = []
     argv_bytes = 0
     for index, item in enumerate(raw_argv):
-        if not isinstance(item, str) or not item or "\x00" in item:
-            _protocol_error(f"argv[{index}] must be a non-empty NUL-free string")
+        if not isinstance(item, str) or "\x00" in item:
+            _protocol_error(f"argv[{index}] must be a NUL-free string")
+        if index == 0 and not item:
+            _protocol_error("argv[0] executable must be non-empty")
         try:
             encoded = item.encode("utf-8")
         except UnicodeEncodeError as exc:

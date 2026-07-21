@@ -12,11 +12,21 @@ from agent_loop.claude_client import (
     build_claude_argv,
     build_claude_invocation,
 )
+from agent_loop.constants import CLAUDE_API_RETRIES, CLAUDE_STRUCTURED_OUTPUT_RETRIES
 from agent_loop.credentials import build_claude_parent_environment
 from agent_loop.errors import AgentLoopError, StopReason
 from agent_loop.prompts import ReviewBundle
-from agent_loop.schemas import ApprovalContext, Verdict, parse_critic_envelope
+from agent_loop.schemas import (
+    ApprovalContext,
+    Verdict,
+    critic_schema_document,
+    parse_critic_envelope,
+)
 from agent_loop.service import BoundedProcessResult, run_bounded_process
+
+_MAX_API_REQUEST_DETAILS = (CLAUDE_API_RETRIES + 1) * (
+    CLAUDE_STRUCTURED_OUTPUT_RETRIES + 1
+)
 
 
 def bundle() -> ReviewBundle:
@@ -29,8 +39,42 @@ def env() -> dict[str, str]:
     )
 
 
-def process(payload: dict[str, object], *, code: int = 0) -> BoundedProcessResult:
-    return BoundedProcessResult(code, json.dumps(payload).encode(), b"", 1.0, 2.0, False, False)
+def process(
+    payload: dict[str, object], *, code: int = 0, stderr: bytes = b""
+) -> BoundedProcessResult:
+    return BoundedProcessResult(
+        code, json.dumps(payload).encode(), stderr, 1.0, 2.0, False, False
+    )
+
+
+def api_request_detail(
+    *,
+    model: str = "claude-pinned",
+    effort: str | None = "high",
+    extra: dict[str, object] | None = None,
+    include_format: bool = False,
+) -> bytes:
+    output_config: dict[str, object] = {}
+    if effort is not None:
+        output_config["effort"] = effort
+    if include_format:
+        output_config["format"] = {
+            "type": "json_schema",
+            "schema": critic_schema_document(),
+        }
+    payload: dict[str, object] = {
+        "model": model,
+        "thinking": {"type": "adaptive", "display": "omitted"},
+        "output_config": output_config,
+        "betas": [],
+    }
+    if extra:
+        payload.update(extra)
+    return (
+        b"2026-07-20T16:42:22.627Z [VERBOSE] [API REQUEST DETAIL] "
+        + json.dumps(payload, separators=(",", ":")).encode()
+        + b"\n"
+    )
 
 
 @pytest.fixture
@@ -95,9 +139,18 @@ def test_050_hostile_claude_project_config_is_not_in_environment_or_cwd() -> Non
 
 def test_051_retry_budget_is_exact_and_watchdog_absent() -> None:
     launch = build_claude_invocation(bundle(), env()).launch_environment()
+    assert set(launch) == set(env()) | {
+        "CLAUDE_CODE_MAX_RETRIES",
+        "API_TIMEOUT_MS",
+        "MAX_STRUCTURED_OUTPUT_RETRIES",
+        "CLAUDE_CODE_DEBUG_LOG_LEVEL",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    }
     assert launch["MAX_STRUCTURED_OUTPUT_RETRIES"] == "1"
     assert launch["CLAUDE_CODE_MAX_RETRIES"] == "2"
     assert launch["API_TIMEOUT_MS"] == "300000"
+    assert launch["CLAUDE_CODE_DEBUG_LOG_LEVEL"] == "verbose"
+    assert launch["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert "CLAUDE_CODE_RETRY_WATCHDOG" not in launch
 
 
@@ -272,8 +325,111 @@ def test_command_has_exact_tool_and_schema_flags() -> None:
     argv = build_claude_argv(model="claude-pinned", effort="high")
     assert argv[argv.index("--model") + 1] == "claude-pinned"
     assert argv[argv.index("--effort") + 1] == "high"
+    assert argv[argv.index("--debug") + 1] == "api"
+    assert "--debug-to-stderr" in argv
+    assert argv.index("--debug-to-stderr") < argv.index("--output-format")
     assert argv[-2] != ""
     assert argv[-1].startswith("You are the independent")
+
+
+@pytest.mark.parametrize("include_format", [False, True])
+def test_api_request_diagnostic_records_exact_model_and_effort(
+    include_format: bool,
+) -> None:
+    stderr = (
+        b"2026-07-20T16:42:22.000Z [VERBOSE] harmless diagnostic\n"
+        + api_request_detail(include_format=include_format)
+    )
+    result = ClaudeClient(lambda _inv, _timeout, _cap: process(lgtm(), stderr=stderr)).review(
+        bundle(),
+        env(),
+        approval=ApprovalContext(True, True, True),
+        timeout_seconds=301,
+        model="claude-pinned",
+        effort="high",
+    )
+
+    assert result.observed_model == "claude-pinned"
+    assert result.observed_effort == "high"
+
+
+def test_api_request_diagnostics_allow_the_complete_exact_retry_budget() -> None:
+    stderr = api_request_detail() * _MAX_API_REQUEST_DETAILS
+    result = ClaudeClient(lambda _inv, _timeout, _cap: process(lgtm(), stderr=stderr)).review(
+        bundle(),
+        env(),
+        approval=ApprovalContext(True, True, True),
+        timeout_seconds=301,
+        model="claude-pinned",
+        effort="high",
+    )
+
+    assert result.observed_model == "claude-pinned"
+    assert result.observed_effort == "high"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        b"",
+        b"spoof [API REQUEST DETAIL] {\"model\":\"claude-pinned\"}\n",
+        api_request_detail(model="claude-other"),
+        api_request_detail(effort="medium"),
+        api_request_detail() + api_request_detail(effort=None),
+        api_request_detail(extra={"prompt": "secret-canary"}),
+        api_request_detail(
+            extra={
+                "output_config": {
+                    "effort": "high",
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"title": {"type": "string"}},
+                            "required": ["title"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            }
+        ),
+        api_request_detail()
+        + api_request_detail(model="claude-other", effort="medium"),
+        api_request_detail() * (_MAX_API_REQUEST_DETAILS + 1),
+        (
+            b"2026-07-20T16:42:22.627Z [VERBOSE] [API REQUEST DETAIL] "
+            b'{"model":"claude-pinned","model":"claude-pinned",'
+            b'"output_config":{"effort":"high"}}\n'
+        ),
+    ],
+    ids=[
+        "missing",
+        "spoofed-framing",
+        "wrong-model",
+        "wrong-effort",
+        "effort-removed-on-retry",
+        "unknown-field",
+        "wrong-output-schema",
+        "conflicting-retry",
+        "retry-budget-exceeded",
+        "duplicate-key",
+    ],
+)
+def test_api_request_diagnostics_fail_closed_without_echoing_raw_data(
+    stderr: bytes,
+) -> None:
+    with pytest.raises(AgentLoopError) as caught:
+        ClaudeClient(lambda _inv, _timeout, _cap: process(lgtm(), stderr=stderr)).review(
+            bundle(),
+            env(),
+            approval=ApprovalContext(True, True, True),
+            timeout_seconds=301,
+            model="claude-pinned",
+            effort="high",
+        )
+
+    assert caught.value.reason is StopReason.SANDBOX_SETUP_FAILURE
+    assert "secret-canary" not in caught.value.detail
 
 
 @pytest.mark.parametrize("field", ["model", "effort"])

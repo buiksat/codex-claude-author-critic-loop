@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_loop.capabilities import (
+    CAPABILITY_RECEIPT_RELATIVE_PATH,
     CAPABILITY_RECEIPT_SCHEMA_VERSION,
     MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS,
     REQUIRED_ACCEPTANCE_GATES,
@@ -16,6 +17,7 @@ from agent_loop.capabilities import (
     CapabilityReceiptError,
     HostCapabilityBinding,
     LiveCapabilityBinding,
+    ManagedClaudeBoundaryCapabilityBinding,
     ToolCapabilityBinding,
     verify_live_capability_receipt,
     write_successful_live_capability_receipt,
@@ -60,6 +62,14 @@ def _binding() -> LiveCapabilityBinding:
             requested_model="claude-opus-4-6",
             requested_effort="medium",
         ),
+        managed_claude_boundary=ManagedClaudeBoundaryCapabilityBinding(
+            policy_path="/etc/claude-code/managed-settings.json",
+            helper_path="/etc/claude-code/agent-loop-boundary-probe",
+            policy_sha256="e" * 64,
+            helper_sha256="f" * 64,
+            probe_protocol="attested-v1",
+            probe_id="reviewed-managed-boundary-v1",
+        ),
     )
 
 
@@ -84,7 +94,7 @@ def _canonical_json(value: object) -> bytes:
 
 
 def test_private_atomic_writer_round_trips_complete_exact_receipt(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     binding = _binding()
 
     written = write_successful_live_capability_receipt(
@@ -106,12 +116,20 @@ def test_private_atomic_writer_round_trips_complete_exact_receipt(tmp_path: Path
     encoded = json.loads(path.read_text(encoding="ascii"))
     assert encoded["tools"]["codex"]["install_closure_sha256"] == "c" * 64
     assert "install_closure_sha256" not in encoded["tools"]["claude"]
+    assert encoded["managed_claude_boundary"] == {
+        "policy_path": "/etc/claude-code/managed-settings.json",
+        "helper_path": "/etc/claude-code/agent-loop-boundary-probe",
+        "policy_sha256": "e" * 64,
+        "helper_sha256": "f" * 64,
+        "probe_protocol": "attested-v1",
+        "probe_id": "reviewed-managed-boundary-v1",
+    }
 
 
 def test_private_writer_can_durably_replace_an_existing_private_receipt(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     _write(path)
     changed = replace(
         _binding(),
@@ -142,7 +160,7 @@ def test_writer_refuses_partial_reordered_or_duplicate_success_claims(
     tmp_path: Path,
     successful_gates: tuple[AcceptanceGate, ...],
 ) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     with pytest.raises(ValueError, match="complete ordered"):
         write_successful_live_capability_receipt(
             path,
@@ -154,7 +172,7 @@ def test_writer_refuses_partial_reordered_or_duplicate_success_claims(
 
 
 def test_receipt_binds_every_security_relevant_live_selection(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     binding = _binding()
     _write(path, binding)
     mismatches = (
@@ -173,6 +191,48 @@ def test_receipt_binds_every_security_relevant_live_selection(tmp_path: Path) ->
         replace(binding, claude=replace(binding.claude, credential_id="other-claude")),
         replace(binding, claude=replace(binding.claude, requested_model="claude-other")),
         replace(binding, claude=replace(binding.claude, requested_effort="high")),
+        replace(
+            binding,
+            managed_claude_boundary=replace(
+                binding.managed_claude_boundary,
+                policy_path="/etc/claude-code/other-managed-settings.json",
+            ),
+        ),
+        replace(
+            binding,
+            managed_claude_boundary=replace(
+                binding.managed_claude_boundary,
+                helper_path="/etc/claude-code/other-boundary-probe",
+            ),
+        ),
+        replace(
+            binding,
+            managed_claude_boundary=replace(
+                binding.managed_claude_boundary,
+                policy_sha256="0" * 64,
+            ),
+        ),
+        replace(
+            binding,
+            managed_claude_boundary=replace(
+                binding.managed_claude_boundary,
+                helper_sha256="1" * 64,
+            ),
+        ),
+        replace(
+            binding,
+            managed_claude_boundary=replace(
+                binding.managed_claude_boundary,
+                probe_protocol="attested-v2",
+            ),
+        ),
+        replace(
+            binding,
+            managed_claude_boundary=replace(
+                binding.managed_claude_boundary,
+                probe_id="other-managed-boundary-v1",
+            ),
+        ),
     )
 
     for mismatch in mismatches:
@@ -181,7 +241,7 @@ def test_receipt_binds_every_security_relevant_live_selection(tmp_path: Path) ->
 
 
 def test_receipt_rejects_future_expired_and_too_old_claims(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     binding = _binding()
     _write(path, binding)
 
@@ -205,7 +265,7 @@ def test_writer_rejects_invalid_or_overlong_lifetime(
 ) -> None:
     with pytest.raises(ValueError, match="valid_for_seconds"):
         write_successful_live_capability_receipt(
-            tmp_path / "capabilities" / "live-v1.json",
+            tmp_path / "capabilities" / "live-v2.json",
             _binding(),
             successful_gates=REQUIRED_ACCEPTANCE_GATES,
             issued_at_unix=ISSUED,
@@ -214,7 +274,7 @@ def test_writer_rejects_invalid_or_overlong_lifetime(
 
 
 def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     binding = _binding()
     _write(path, binding)
     valid = json.loads(path.read_bytes())
@@ -232,6 +292,22 @@ def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: 
     del missing_nested["host"]["kernel"]
     mutations.append(_canonical_json(missing_nested))
 
+    unknown_boundary = json.loads(json.dumps(valid))
+    unknown_boundary["managed_claude_boundary"]["ambient"] = "unsupported"
+    mutations.append(_canonical_json(unknown_boundary))
+
+    missing_boundary = json.loads(json.dumps(valid))
+    del missing_boundary["managed_claude_boundary"]["helper_sha256"]
+    mutations.append(_canonical_json(missing_boundary))
+
+    missing_boundary_object = dict(valid)
+    del missing_boundary_object["managed_claude_boundary"]
+    mutations.append(_canonical_json(missing_boundary_object))
+
+    tampered_boundary = json.loads(json.dumps(valid))
+    tampered_boundary["managed_claude_boundary"]["policy_sha256"] = "0" * 64
+    mutations.append(_canonical_json(tampered_boundary))
+
     wrong_schema = dict(valid)
     wrong_schema["schema_version"] = CAPABILITY_RECEIPT_SCHEMA_VERSION + 1
     mutations.append(_canonical_json(wrong_schema))
@@ -247,8 +323,8 @@ def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: 
     canonical = _canonical_json(valid)
     mutations.append(
         canonical.replace(
-            b'"schema_version":1',
-            b'"schema_version":1,"schema_version":1',
+            b'"schema_version":2',
+            b'"schema_version":2,"schema_version":2',
         )
     )
     mutations.append(json.dumps(valid, indent=2, sort_keys=True).encode("ascii") + b"\n")
@@ -260,7 +336,7 @@ def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: 
 
 
 def test_verifier_rejects_permissive_file_and_directory_modes(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     binding = _binding()
     _write(path, binding)
 
@@ -275,7 +351,7 @@ def test_verifier_rejects_permissive_file_and_directory_modes(tmp_path: Path) ->
 
 
 def test_verifier_rejects_symlinks_and_hard_links(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v1.json"
+    path = tmp_path / "capabilities" / "live-v2.json"
     binding = _binding()
     _write(path, binding)
 
@@ -292,7 +368,7 @@ def test_verifier_rejects_symlinks_and_hard_links(tmp_path: Path) -> None:
 
 def test_intermediate_directory_symlink_is_never_followed(tmp_path: Path) -> None:
     real = tmp_path / "real"
-    path = real / "live-v1.json"
+    path = real / "live-v2.json"
     binding = _binding()
     _write(path, binding)
     redirect = tmp_path / "redirect"
@@ -300,7 +376,7 @@ def test_intermediate_directory_symlink_is_never_followed(tmp_path: Path) -> Non
 
     with pytest.raises(CapabilityReceiptError, match="without symlinks"):
         verify_live_capability_receipt(
-            redirect / "live-v1.json",
+            redirect / "live-v2.json",
             binding,
             now_unix=ISSUED + 1,
         )
@@ -312,7 +388,7 @@ def test_writer_rejects_existing_symlink_without_touching_its_target(tmp_path: P
     target = directory / "target"
     target.write_bytes(b"do not replace")
     target.chmod(0o600)
-    receipt_path = directory / "live-v1.json"
+    receipt_path = directory / "live-v2.json"
     receipt_path.symlink_to(target.name)
 
     with pytest.raises(CapabilityReceiptError, match="existing.*private regular"):
@@ -325,7 +401,7 @@ def test_writer_rejects_existing_symlink_without_touching_its_target(tmp_path: P
 def test_writer_rejects_existing_permissive_or_hard_linked_file(tmp_path: Path) -> None:
     directory = tmp_path / "capabilities"
     directory.mkdir(mode=0o700)
-    receipt_path = directory / "live-v1.json"
+    receipt_path = directory / "live-v2.json"
     receipt_path.write_bytes(b"old")
     receipt_path.chmod(0o644)
 
@@ -353,6 +429,50 @@ def test_constructor_rejects_unproven_host_probe_flags_and_unsafe_hashes() -> No
         replace(host, namespace_probe=False)
     with pytest.raises(CapabilityReceiptError, match="SHA-256"):
         replace(_binding().codex, executable_sha256="not-a-digest")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "detail"),
+    [
+        ("policy_path", "relative/settings.json", "absolute non-root"),
+        ("policy_path", "/etc/claude-code/../settings.json", "absolute non-root"),
+        ("policy_path", "/", "absolute non-root"),
+        ("helper_path", "//etc/claude-code/helper", "absolute non-root"),
+        ("helper_path", "/etc/claude-code/helper/", "absolute non-root"),
+        ("policy_sha256", "not-a-digest", "SHA-256"),
+        ("helper_sha256", "A" * 64, "SHA-256"),
+        ("probe_protocol", "attested/v1", "safe exact identifier"),
+        ("probe_id", "../probe", "safe exact identifier"),
+    ],
+)
+def test_managed_claude_boundary_rejects_unsafe_closed_world_values(
+    field: str,
+    value: str,
+    detail: str,
+) -> None:
+    with pytest.raises(CapabilityReceiptError, match=detail):
+        replace(_binding().managed_claude_boundary, **{field: value})
+
+
+def test_environment_report_constructor_requires_managed_claude_boundary() -> None:
+    with pytest.raises(TypeError, match="managed_claude_boundary"):
+        LiveCapabilityBinding.from_environment_report(  # type: ignore[call-arg]
+            object(),  # type: ignore[arg-type]
+            codex_credential_id="codex-account",
+            claude_credential_id="claude-account",
+            author_model="gpt-5.4-codex",
+            author_effort="high",
+            critic_model="claude-opus-4-6",
+            critic_effort="medium",
+            runtime_closure_sha256="8" * 64,
+        )
+
+
+def test_receipt_v2_path_and_schema_are_explicit() -> None:
+    assert CAPABILITY_RECEIPT_SCHEMA_VERSION == 2
+    assert CAPABILITY_RECEIPT_RELATIVE_PATH == Path(
+        "agent-loop/capabilities/live-v2.json"
+    )
 
 
 def test_validity_ceiling_is_explicitly_short_lived() -> None:

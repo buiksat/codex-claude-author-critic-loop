@@ -1,0 +1,19 @@
+{
+  "allowManagedHooksOnly": true,
+  "disableAllHooks": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/libexec/agent-loop-claude-boundary-attest",
+            "args": [],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

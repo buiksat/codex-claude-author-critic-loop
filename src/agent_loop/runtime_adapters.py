@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from . import claude_managed_policy
 from .artifacts import ContentAddressedBlobStore
 from .claude_client import ClaudeClient, ClaudeInvocation
 from .codex_client import CodexClient, CodexInvocation, build_codex_parent_environment
@@ -1023,6 +1024,82 @@ def _reviewed_install(
     return install_mount, selected_executable
 
 
+def _reviewed_managed_claude_boundary(
+    boundary: claude_managed_policy.ManagedClaudeBoundary,
+    *,
+    install_mount: SandboxMount,
+    config_mount: SandboxMount,
+) -> tuple[SandboxMount, SandboxMount]:
+    """Validate the two fixed administrator-managed critic mounts."""
+
+    if not isinstance(boundary, claude_managed_policy.ManagedClaudeBoundary):
+        raise TypeError("managed_boundary must be a ManagedClaudeBoundary")
+    if (
+        boundary.protocol
+        != claude_managed_policy.MANAGED_CLAUDE_BOUNDARY_PROTOCOL
+        or boundary.probe_id != claude_managed_policy.MANAGED_CLAUDE_BOUNDARY_ID
+    ):
+        raise ValueError("managed Claude boundary identity is unsupported")
+
+    expected = (
+        (
+            boundary.policy_mount,
+            claude_managed_policy.MANAGED_CLAUDE_POLICY_SOURCE,
+            claude_managed_policy.MANAGED_CLAUDE_POLICY_TARGET,
+            "policy",
+        ),
+        (
+            boundary.helper_mount,
+            claude_managed_policy.MANAGED_CLAUDE_HELPER_SOURCE,
+            claude_managed_policy.MANAGED_CLAUDE_HELPER_TARGET,
+            "helper",
+        ),
+    )
+    reviewed: list[SandboxMount] = []
+    for mount, source, target, name in expected:
+        if not isinstance(mount, SandboxMount):
+            raise TypeError(f"managed Claude {name} mount must be a SandboxMount")
+        if mount.source != source or mount.target != target:
+            raise ValueError(f"managed Claude {name} mount path is not the fixed path")
+        if not mount.read_only or mount.closure_sha256 is None:
+            raise ValueError(
+                f"managed Claude {name} mount must be read-only and closure-witnessed"
+            )
+        _normalized_host_path(mount.source, name=f"managed Claude {name} source")
+        _normalized_sandbox_path(mount.target, name=f"managed Claude {name} target")
+        _reject_supervisor_shadow(mount.target)
+        reviewed.append(mount)
+
+    policy_mount, helper_mount = reviewed
+    if _targets_overlap(policy_mount.target, helper_mount.target):
+        raise ValueError("managed Claude mount targets cannot overlap")
+
+    private_targets = (
+        "/control",
+        "/dev",
+        "/proc",
+        "/run",
+        "/runtime",
+        "/tmp",
+        "/workspace",
+    )
+    existing_targets = (install_mount.target, config_mount.target)
+    for mount in reviewed:
+        if any(_targets_overlap(mount.target, target) for target in private_targets):
+            raise ValueError("managed Claude mounts cannot enter private sandbox state")
+        if any(_targets_overlap(mount.target, target) for target in existing_targets):
+            raise ValueError("managed Claude mounts cannot overlap install or config mounts")
+
+    existing_sources = (install_mount.source, config_mount.source)
+    for mount in reviewed:
+        if any(_targets_overlap(mount.source, source) for source in existing_sources):
+            raise ValueError("managed Claude sources cannot overlap install or config sources")
+    if _targets_overlap(policy_mount.source, helper_mount.source):
+        raise ValueError("managed Claude mount sources cannot overlap")
+
+    return policy_mount, helper_mount
+
+
 class SandboxedCodexAuthorAdapter:
     """Exact first/resume Codex turns over a transactional control mount."""
 
@@ -1205,6 +1282,7 @@ class SandboxedClaudeCriticAdapter:
         install_mount: SandboxMount,
         executable: str,
         config_dir: str | os.PathLike[str],
+        managed_boundary: claude_managed_policy.ManagedClaudeBoundary,
         timeout_seconds: float = DEFAULT_CRITIC_TIMEOUT_SECONDS,
         model: str | None = None,
         effort: str | None = None,
@@ -1236,6 +1314,14 @@ class SandboxedClaudeCriticAdapter:
             config_source,
             "/control/claude-home",
             read_only=True,
+        )
+        (
+            self._managed_policy_mount,
+            self._managed_helper_mount,
+        ) = _reviewed_managed_claude_boundary(
+            managed_boundary,
+            install_mount=reviewed_mount,
+            config_mount=self._config_mount,
         )
         self._timeout_seconds = selected_timeout
         self._model = model
@@ -1285,7 +1371,12 @@ class SandboxedClaudeCriticAdapter:
                 cwd=invocation.cwd,
                 stdin_bytes=invocation.stdin,
                 timeout_seconds=selected_timeout,
-                mounts=(self._install_mount, self._config_mount),
+                mounts=(
+                    self._install_mount,
+                    self._config_mount,
+                    self._managed_policy_mount,
+                    self._managed_helper_mount,
+                ),
                 output_max_bytes=output_max_bytes,
             )
             if captured.result.candidate != SubjectManifest.empty():
@@ -1334,33 +1425,49 @@ class SandboxedClaudeCriticAdapter:
                 StopReason.RUNNER_INTERNAL_ERROR,
                 "Claude transport returned no sandbox result",
             )
-        observed_model: str | None = None
+        observed_model = result.observed_model
         raw_model = result.envelope.get("model")
-        if isinstance(raw_model, str) and raw_model and len(raw_model.encode("utf-8")) <= 256:
-            observed_model = raw_model
-        elif len(result.usage.model_usage) == 1:
-            sole_model = next(iter(result.usage.model_usage))
+        if raw_model is not None:
             if (
-                isinstance(sole_model, str)
-                and sole_model
-                and len(sole_model.encode("utf-8")) <= 256
+                not isinstance(raw_model, str)
+                or not raw_model
+                or len(raw_model.encode("utf-8")) > 256
             ):
-                observed_model = sole_model
-        observed_effort: str | None = None
-        raw_effort = result.envelope.get("effort")
-        if (
-            isinstance(raw_effort, str)
-            and raw_effort
-            and len(raw_effort.encode("utf-8")) <= 256
-        ):
-            observed_effort = raw_effort
+                raise fail(
+                    StopReason.SANDBOX_SETUP_FAILURE,
+                    "Claude result reported invalid model-selection metadata",
+                )
+            if observed_model is not None and raw_model != observed_model:
+                raise fail(
+                    StopReason.SANDBOX_SETUP_FAILURE,
+                    "Claude result and API request reported different models",
+                )
+            observed_model = raw_model
+        if result.usage.model_usage:
+            if len(result.usage.model_usage) != 1:
+                raise fail(
+                    StopReason.SANDBOX_SETUP_FAILURE,
+                    "Claude usage reported ambiguous model-selection metadata",
+                )
+            sole_model = next(iter(result.usage.model_usage))
+            if not sole_model or len(sole_model.encode("utf-8")) > 256:
+                raise fail(
+                    StopReason.SANDBOX_SETUP_FAILURE,
+                    "Claude usage reported invalid model-selection metadata",
+                )
+            if observed_model is not None and sole_model != observed_model:
+                raise fail(
+                    StopReason.SANDBOX_SETUP_FAILURE,
+                    "Claude usage and API request reported different models",
+                )
+            observed_model = sole_model
         return CriticTurn(
             review=result.review,
             completed_at=result.completed_at,
             envelope=result.envelope,
             total_cost_usd=result.usage.total_cost_usd,
             observed_model=observed_model,
-            observed_effort=observed_effort,
+            observed_effort=result.observed_effort,
         )
 
 

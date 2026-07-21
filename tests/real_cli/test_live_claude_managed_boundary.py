@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 import time
 from pathlib import Path
 
 import pytest
 
 from agent_loop.artifacts import ArtifactStore, ContentAddressedBlobStore
+from agent_loop.claude_managed_policy import (
+    MANAGED_CLAUDE_BOUNDARY_MARKER,
+    MANAGED_CLAUDE_HELPER_TARGET,
+    MANAGED_CLAUDE_POLICY_TARGET,
+)
 from agent_loop.credentials import load_claude_setup_token
 from agent_loop.manifests import SubjectManifest
 from agent_loop.prompts import ReviewBundle
@@ -23,32 +26,11 @@ from tests.real_cli.live_support import (
     required_directory,
     required_identifier,
     required_install,
+    required_managed_claude_boundary,
     required_value,
 )
 
 pytestmark = pytest.mark.real_cli
-
-_PROBE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-
-
-def _managed_probe_marker() -> bytes:
-    if os.environ.get("AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE") != "attested-v1":
-        pytest.xfail(
-            "blocked acceptance 49: an administrator must provision a pinned Claude managed "
-            "hook/status/file-suggestion process and set "
-            "AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE=attested-v1; the process must inherit the "
-            "real Claude child environment, verify CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1, verify "
-            "all Anthropic/cloud credential variables are absent, be visible inside the exact "
-            "reviewed install/system-policy mounts, and emit the required non-secret attestation "
-            "marker to captured stderr only after those checks pass"
-        )
-    probe_id = required_value("AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID")
-    if _PROBE_ID.fullmatch(probe_id) is None:
-        pytest.fail("AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID must be a safe non-secret identifier")
-    return (
-        f"AGENT_LOOP_MANAGED_CLAUDE_BOUNDARY_OK:{probe_id}:"
-        "credential_absent:scrub=1"
-    ).encode("ascii")
 
 
 def _bundle() -> ReviewBundle:
@@ -76,9 +58,10 @@ def test_049_live_managed_claude_child_is_scrubbed_confined_and_attested(
     tmp_path: Path,
 ) -> None:
     require_live()
+    managed_boundary = required_managed_claude_boundary()
     credential_id = required_identifier("AGENT_LOOP_CLAUDE_CREDENTIAL_ID")
     state_home = required_directory("AGENT_LOOP_STATE_HOME")
-    marker = _managed_probe_marker()
+    marker = MANAGED_CLAUDE_BOUNDARY_MARKER.encode("ascii")
     require_paid_confirmation("claude")
     install = required_install("claude")
     model = required_value("AGENT_LOOP_CLAUDE_MODEL")
@@ -97,6 +80,7 @@ def test_049_live_managed_claude_child_is_scrubbed_confined_and_attested(
             install_mount=install.mount,
             executable=install.sandbox_executable,
             config_dir=config_dir,
+            managed_boundary=managed_boundary,
             timeout_seconds=360,
             model=model,
             effort=effort,
@@ -128,6 +112,20 @@ def test_049_live_managed_claude_child_is_scrubbed_confined_and_attested(
 
     assert len(service.commands) == 1
     command = launched_bwrap_argv(service.commands[0])
+    read_only_targets = [
+        command[index + 2]
+        for index, item in enumerate(command[:-2])
+        if item == "--ro-bind"
+    ]
+    assert read_only_targets.count(MANAGED_CLAUDE_POLICY_TARGET) == 1
+    assert read_only_targets.count(MANAGED_CLAUDE_HELPER_TARGET) == 1
+    writable_targets = [
+        command[index + 2]
+        for index, item in enumerate(command[:-2])
+        if item == "--bind"
+    ]
+    assert MANAGED_CLAUDE_POLICY_TARGET not in writable_targets
+    assert MANAGED_CLAUDE_HELPER_TARGET not in writable_targets
     for boundary in (
         "--unshare-user",
         "--unshare-pid",

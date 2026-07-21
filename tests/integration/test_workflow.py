@@ -3,11 +3,20 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import agent_loop.workflow as workflow
 from agent_loop.artifacts import ArtifactStore
+from agent_loop.capabilities import CapabilityReceiptError
+from agent_loop.claude_managed_policy import (
+    MANAGED_CLAUDE_HELPER_SOURCE,
+    MANAGED_CLAUDE_HELPER_TARGET,
+    MANAGED_CLAUDE_POLICY_SOURCE,
+    MANAGED_CLAUDE_POLICY_TARGET,
+    ManagedClaudeBoundary,
+)
 from agent_loop.cli import build_parser
 from agent_loop.constants import REGULAR_MODE, Limits
 from agent_loop.declassify import KnownSecret
@@ -15,6 +24,7 @@ from agent_loop.errors import AgentLoopError, StopReason, fail
 from agent_loop.git_source import GitSourceSnapshot
 from agent_loop.manifests import build_manifest_from_scan
 from agent_loop.models import BlobWriter, EntryKind, ScanRecord
+from agent_loop.preflight import EnvironmentReport, TrustedExecutable
 from agent_loop.runner import (
     AuthorRequest,
     AuthorTurn,
@@ -24,8 +34,11 @@ from agent_loop.runner import (
     ValidationTurn,
 )
 from agent_loop.schemas import CriticReview, Verdict
+from agent_loop.sandbox import BubblewrapProvenance, SandboxMount
 from agent_loop.validation import CheckExecution, ValidationSummary
 from agent_loop.workflow import (
+    ProductionWorkflowBackend,
+    ReviewedInstall,
     RunConfiguration,
     RunPreparation,
     RuntimeAdapters,
@@ -307,6 +320,316 @@ def _run_json(backend: _FakeBackend) -> dict[str, object]:
     assert isinstance(value, dict)
     assert all(isinstance(key, str) for key in value)
     return value
+
+
+def _production_environment() -> EnvironmentReport:
+    bubblewrap = BubblewrapProvenance(
+        "0.11.1-1ubuntu0.1",
+        "0.11.1",
+        "/usr/bin/bwrap",
+        0,
+        0,
+        0o755,
+        "a" * 64,
+    )
+    python = TrustedExecutable(
+        "/usr/bin/python3.14",
+        "/usr/bin/python3.14",
+        0,
+        0o755,
+        "b" * 64,
+        "Python 3.14.4",
+    )
+    codex = TrustedExecutable(
+        "/opt/codex",
+        "/opt/codex",
+        0,
+        0o755,
+        "c" * 64,
+        "codex-cli 0.144.6",
+    )
+    claude = TrustedExecutable(
+        "/opt/claude",
+        "/opt/claude",
+        0,
+        0o755,
+        "d" * 64,
+        "2.1.215 (Claude Code)",
+    )
+    return EnvironmentReport(
+        "ubuntu",
+        "26.04",
+        "x86_64",
+        "7.0.0-test",
+        "3.14.4",
+        "git version 2.53.0",
+        "systemd 259 (259.5-0ubuntu3)",
+        "GNU bash, version 5.3.3(1)-release",
+        bubblewrap,
+        python,
+        codex,
+        claude,
+        True,
+        True,
+        True,
+    )
+
+
+def _production_configuration() -> RunConfiguration:
+    return RunConfiguration(
+        workflow.ProjectConfig(
+            author_model="gpt-5.4-codex",
+            author_effort="high",
+            critic_model="claude-opus-4-6",
+            critic_effort="medium",
+            codex_credential_id="author-account",
+            claude_credential_id="critic-token",
+        ),
+        Path("/opt/codex"),
+        Path("/opt/claude"),
+    )
+
+
+def _production_preparation(
+    tmp_path: Path,
+    *,
+    artifacts: ArtifactStore | None = None,
+) -> SimpleNamespace:
+    source = tmp_path / "source"
+    state_home = tmp_path / "state"
+    run_root = state_home / "agent-loop" / "runs" / "run-production-test"
+    source.mkdir(exist_ok=True)
+    state_home.mkdir(exist_ok=True)
+    return SimpleNamespace(
+        run_id="run-production-test",
+        source=source,
+        state_home=state_home,
+        run_root=run_root,
+        task="test",
+        configuration=_production_configuration(),
+        environment=_production_environment(),
+        snapshot=None,
+        artifacts=artifacts,
+        blobs=object(),
+    )
+
+
+def _managed_boundary(
+    *,
+    policy_sha256: str = "e" * 64,
+    helper_sha256: str = "f" * 64,
+) -> ManagedClaudeBoundary:
+    return ManagedClaudeBoundary(
+        policy_mount=SandboxMount(
+            MANAGED_CLAUDE_POLICY_SOURCE,
+            MANAGED_CLAUDE_POLICY_TARGET,
+            read_only=True,
+            closure_sha256=policy_sha256,
+        ),
+        helper_mount=SandboxMount(
+            MANAGED_CLAUDE_HELPER_SOURCE,
+            MANAGED_CLAUDE_HELPER_TARGET,
+            read_only=True,
+            closure_sha256=helper_sha256,
+        ),
+    )
+
+
+def _reviewed_install(name: str) -> ReviewedInstall:
+    target = f"/opt/reviewed-{name}"
+    digest = "1" * 64 if name == "codex" else "2" * 64
+    return ReviewedInstall(
+        SandboxMount(f"/opt/{name}", target, closure_sha256=digest),
+        target + "/executable",
+        digest,
+    )
+
+
+@pytest.mark.parametrize("failure", (FileNotFoundError("missing"), ValueError("unsafe")))
+def test_production_managed_claude_boundary_missing_or_unsafe_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    backend = ProductionWorkflowBackend()
+    preparation = _production_preparation(tmp_path)
+
+    def reject() -> ManagedClaudeBoundary:
+        raise failure
+
+    monkeypatch.setattr(workflow, "inspect_managed_claude_boundary", reject)
+    with pytest.raises(AgentLoopError) as caught:
+        backend._claude_boundary(preparation)  # type: ignore[arg-type]
+
+    assert caught.value.reason is StopReason.GITLESS_INVOCATION_PROBE_FAILED
+    assert backend._managed_claude_boundary is None
+
+
+def test_production_managed_claude_boundary_rejects_private_authority_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = ProductionWorkflowBackend()
+    preparation = _production_preparation(tmp_path)
+    preparation.source = Path("/etc")
+    monkeypatch.setattr(
+        workflow,
+        "inspect_managed_claude_boundary",
+        _managed_boundary,
+    )
+
+    with pytest.raises(AgentLoopError) as caught:
+        backend._claude_boundary(preparation)  # type: ignore[arg-type]
+
+    assert caught.value.reason is StopReason.GITLESS_INVOCATION_PROBE_FAILED
+    assert backend._managed_claude_boundary is None
+
+
+def test_production_capability_binding_contains_exact_managed_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = ProductionWorkflowBackend()
+    preparation = _production_preparation(tmp_path)
+    boundary = _managed_boundary()
+    inspections = 0
+
+    def inspect() -> ManagedClaudeBoundary:
+        nonlocal inspections
+        inspections += 1
+        return boundary
+
+    monkeypatch.setattr(workflow, "inspect_managed_claude_boundary", inspect)
+    monkeypatch.setattr(
+        backend,
+        "_install",
+        lambda _preparation, *, name: _reviewed_install(name),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "installed_runtime_closure_sha256",
+        lambda: "3" * 64,
+    )
+    captured: list[tuple[Path, object]] = []
+    monkeypatch.setattr(
+        workflow,
+        "verify_live_capability_receipt",
+        lambda path, expected: captured.append((path, expected)),
+    )
+
+    backend.prove_capabilities(preparation)  # type: ignore[arg-type]
+
+    assert inspections == 1
+    assert len(captured) == 1
+    receipt_path, binding = captured[0]
+    assert receipt_path == preparation.state_home / workflow.CAPABILITY_RECEIPT_RELATIVE_PATH
+    assert isinstance(binding, workflow.LiveCapabilityBinding)
+    assert binding.managed_claude_boundary == workflow.ManagedClaudeBoundaryCapabilityBinding(
+        policy_path=boundary.policy_mount.source,
+        helper_path=boundary.helper_mount.source,
+        policy_sha256=boundary.policy_sha256,
+        helper_sha256=boundary.helper_sha256,
+        probe_protocol=boundary.protocol,
+        probe_id=boundary.probe_id,
+    )
+
+
+def test_production_managed_boundary_receipt_mismatch_fails_before_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = ProductionWorkflowBackend()
+    preparation = _production_preparation(tmp_path)
+    monkeypatch.setattr(
+        workflow,
+        "inspect_managed_claude_boundary",
+        _managed_boundary,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_install",
+        lambda _preparation, *, name: _reviewed_install(name),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "installed_runtime_closure_sha256",
+        lambda: "3" * 64,
+    )
+
+    def mismatch(_path: Path, _expected: object) -> None:
+        raise CapabilityReceiptError("managed boundary digest mismatch")
+
+    monkeypatch.setattr(workflow, "verify_live_capability_receipt", mismatch)
+    with pytest.raises(AgentLoopError) as caught:
+        backend.prove_capabilities(preparation)  # type: ignore[arg-type]
+
+    assert caught.value.reason is StopReason.GITLESS_INVOCATION_PROBE_FAILED
+
+
+def test_production_runtime_reuses_and_propagates_receipt_witnessed_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "state" / "agent-loop" / "runs" / "run-production-test"
+    with ArtifactStore.create(run_root) as artifacts:
+        preparation = _production_preparation(tmp_path, artifacts=artifacts)
+        backend = ProductionWorkflowBackend()
+        witnessed = _managed_boundary()
+        replacement = _managed_boundary(
+            policy_sha256="4" * 64,
+            helper_sha256="5" * 64,
+        )
+        inspections = 0
+
+        def inspect() -> ManagedClaudeBoundary:
+            nonlocal inspections
+            inspections += 1
+            return witnessed if inspections == 1 else replacement
+
+        monkeypatch.setattr(workflow, "inspect_managed_claude_boundary", inspect)
+        assert backend._claude_boundary(preparation) is witnessed  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            backend,
+            "_install",
+            lambda _preparation, *, name: _reviewed_install(name),
+        )
+        monkeypatch.setattr(workflow, "SandboxExecutor", lambda *args, **kwargs: object())
+        author = object()
+        validator = object()
+        critic = object()
+        monkeypatch.setattr(
+            workflow,
+            "SandboxedCodexAuthorAdapter",
+            lambda *args, **kwargs: author,
+        )
+        monkeypatch.setattr(
+            workflow,
+            "SandboxedValidationAdapter",
+            lambda *args, **kwargs: validator,
+        )
+        propagated: list[ManagedClaudeBoundary] = []
+
+        def critic_adapter(*args: object, **kwargs: object) -> object:
+            boundary = kwargs["managed_boundary"]
+            assert isinstance(boundary, ManagedClaudeBoundary)
+            propagated.append(boundary)
+            return critic
+
+        monkeypatch.setattr(workflow, "SandboxedClaudeCriticAdapter", critic_adapter)
+        transaction = _FakeTransaction([], tmp_path / "codex-home")
+
+        runtime = backend.build_runtime(
+            preparation,  # type: ignore[arg-type]
+            transaction,
+            "fake-claude-token",
+            (),
+        )
+
+    assert runtime.author is author
+    assert runtime.validator is validator
+    assert runtime.critic is critic
+    assert propagated == [witnessed]
+    assert inspections == 1
 
 
 def test_declined_confirmation_follows_baseline_and_never_calls_a_model(

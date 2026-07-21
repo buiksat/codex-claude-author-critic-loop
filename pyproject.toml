@@ -32,6 +32,7 @@ include-package-data = true
 "share/agent-loop" = ["PLAN.md"]
 "share/agent-loop/docs" = ["docs/IMPLEMENTATION_STATUS.md"]
 "share/agent-loop/schemas" = ["schemas/*.json"]
+"share/agent-loop/support/managed-claude-boundary" = ["support/managed-claude-boundary/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

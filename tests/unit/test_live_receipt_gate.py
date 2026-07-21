@@ -21,8 +21,10 @@ from tests.real_cli.live_support import (
 def isolated_observations() -> Iterator[None]:
     values = dict(live_support._OBSERVED_VALUES)
     installs = dict(live_support._OBSERVED_INSTALLS)
+    boundary = live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY
     live_support._OBSERVED_VALUES.clear()
     live_support._OBSERVED_INSTALLS.clear()
+    live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY = None
     try:
         yield
     finally:
@@ -30,6 +32,7 @@ def isolated_observations() -> Iterator[None]:
         live_support._OBSERVED_VALUES.update(values)
         live_support._OBSERVED_INSTALLS.clear()
         live_support._OBSERVED_INSTALLS.update(installs)
+        live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY = boundary
 
 
 def _report(
@@ -98,12 +101,14 @@ def test_receipt_ledger_rejects_a_collection_time_skip() -> None:
 def test_each_pytest_session_resets_receipt_ledger_and_observed_selectors() -> None:
     _record_complete_passes(root_conftest._LEDGER)
     live_support._OBSERVED_VALUES["AGENT_LOOP_STATE_HOME"] = "/stale"
+    live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY = object()  # type: ignore[assignment]
     assert root_conftest._LEDGER.eligible(int(pytest.ExitCode.OK)) is True
 
     root_conftest.pytest_sessionstart(SimpleNamespace())
 
     assert root_conftest._LEDGER.eligible(int(pytest.ExitCode.OK)) is False
     assert live_support._OBSERVED_VALUES == {}
+    assert live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY is None
 
 
 def test_live_installs_use_the_same_production_mount_boundaries(

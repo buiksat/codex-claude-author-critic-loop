@@ -16,7 +16,14 @@ from agent_loop.capabilities import (
     CAPABILITY_RECEIPT_RELATIVE_PATH,
     REQUIRED_ACCEPTANCE_GATES,
     LiveCapabilityBinding,
+    ManagedClaudeBoundaryCapabilityBinding,
     write_successful_live_capability_receipt,
+)
+from agent_loop.claude_managed_policy import (
+    MANAGED_CLAUDE_BOUNDARY_ID,
+    MANAGED_CLAUDE_BOUNDARY_PROTOCOL,
+    ManagedClaudeBoundary,
+    inspect_managed_claude_boundary,
 )
 from agent_loop.constants import SUPPORTED_CODEX_VERSION
 from agent_loop.preflight import run_preflight
@@ -93,6 +100,8 @@ _RECEIPT_VALUE_NAMES = (
     "AGENT_LOOP_CODEX_INSTALL_RELATIVE",
     "AGENT_LOOP_CLAUDE_INSTALL_ROOT",
     "AGENT_LOOP_CLAUDE_INSTALL_RELATIVE",
+    "AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE",
+    "AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID",
 )
 
 _OBSERVED_VALUES: dict[str, str] = {}
@@ -183,6 +192,7 @@ class LiveInstall:
 
 
 _OBSERVED_INSTALLS: dict[str, LiveInstall] = {}
+_OBSERVED_MANAGED_CLAUDE_BOUNDARY: ManagedClaudeBoundary | None = None
 
 
 def reset_live_gate_session_state() -> None:
@@ -190,6 +200,8 @@ def reset_live_gate_session_state() -> None:
 
     _OBSERVED_VALUES.clear()
     _OBSERVED_INSTALLS.clear()
+    global _OBSERVED_MANAGED_CLAUDE_BOUNDARY
+    _OBSERVED_MANAGED_CLAUDE_BOUNDARY = None
 
 
 def launched_bwrap_argv(command: tuple[str, ...]) -> tuple[str, ...]:
@@ -294,6 +306,45 @@ def required_install(tool: str) -> LiveInstall:
     return _pytest_checked(lambda: inspect_live_install(tool))
 
 
+def _checked_managed_claude_selectors() -> tuple[str, str]:
+    protocol = _checked_identifier("AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE")
+    probe_id = _checked_identifier("AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID")
+    if protocol != MANAGED_CLAUDE_BOUNDARY_PROTOCOL:
+        raise LiveGateConfigurationError(
+            "AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE does not match the fixed protocol"
+        )
+    if probe_id != MANAGED_CLAUDE_BOUNDARY_ID:
+        raise LiveGateConfigurationError(
+            "AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID does not match the fixed identifier"
+        )
+    return protocol, probe_id
+
+
+def inspect_live_managed_claude_boundary() -> ManagedClaudeBoundary:
+    """Inspect and freeze the exact admin boundary used throughout one live session."""
+
+    _checked_managed_claude_selectors()
+    try:
+        selected = inspect_managed_claude_boundary()
+    except (OSError, TypeError, ValueError) as exc:
+        raise LiveGateConfigurationError(
+            "the managed Claude policy/helper boundary is missing or unsafe"
+        ) from exc
+    global _OBSERVED_MANAGED_CLAUDE_BOUNDARY
+    previous = _OBSERVED_MANAGED_CLAUDE_BOUNDARY
+    if previous is None:
+        _OBSERVED_MANAGED_CLAUDE_BOUNDARY = selected
+    elif previous != selected:
+        raise LiveGateConfigurationError(
+            "the managed Claude policy/helper boundary changed during the live session"
+        )
+    return selected
+
+
+def required_managed_claude_boundary() -> ManagedClaudeBoundary:
+    return _pytest_checked(inspect_live_managed_claude_boundary)
+
+
 @dataclass(slots=True)
 class LiveGateReportLedger:
     """Track exact pass phases and reject sessions containing skip/xfail outcomes."""
@@ -341,10 +392,12 @@ def write_live_gate_receipt_from_observed_environment() -> Path:
         )
     for name in _RECEIPT_VALUE_NAMES:
         _checked_value(name)
+    _checked_managed_claude_selectors()
     before = {
         "codex": inspect_live_install("codex"),
         "claude": inspect_live_install("claude"),
     }
+    boundary_before = inspect_live_managed_claude_boundary()
     report = run_preflight(
         codex_path=os.fspath(before["codex"].host_executable),
         claude_path=os.fspath(before["claude"].host_executable),
@@ -353,9 +406,14 @@ def write_live_gate_receipt_from_observed_environment() -> Path:
         "codex": inspect_live_install("codex"),
         "claude": inspect_live_install("claude"),
     }
+    boundary_after = inspect_live_managed_claude_boundary()
     if before != after:
         raise LiveGateConfigurationError(
             "a reviewed live install changed while constructing its capability receipt"
+        )
+    if boundary_before != boundary_after:
+        raise LiveGateConfigurationError(
+            "the managed Claude boundary changed while constructing its receipt"
         )
     if (
         report.codex.resolved_path != os.fspath(after["codex"].host_executable)
@@ -372,6 +430,14 @@ def write_live_gate_receipt_from_observed_environment() -> Path:
         author_effort=_checked_value("AGENT_LOOP_CODEX_EFFORT"),
         critic_model=_checked_value("AGENT_LOOP_CLAUDE_MODEL"),
         critic_effort=_checked_value("AGENT_LOOP_CLAUDE_EFFORT"),
+        managed_claude_boundary=ManagedClaudeBoundaryCapabilityBinding(
+            policy_path=boundary_after.policy_mount.source,
+            helper_path=boundary_after.helper_mount.source,
+            policy_sha256=boundary_after.policy_sha256,
+            helper_sha256=boundary_after.helper_sha256,
+            probe_protocol=boundary_after.protocol,
+            probe_id=boundary_after.probe_id,
+        ),
         codex_install_closure_sha256=after["codex"].closure_sha256,
         claude_install_closure_sha256=after["claude"].closure_sha256,
         runtime_closure_sha256=installed_runtime_closure_sha256(),

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft7Validator, Draft202012Validator, ValidationError
 
 from agent_loop.artifacts import ArtifactStore
 from agent_loop.constants import SUPPORTED_BWRAP_SHA256
@@ -111,7 +111,7 @@ class EmptyBlobs:
         raise AssertionError(f"unexpected blob read: {sha256}")
 
 
-def test_every_schema_document_is_valid_draft_2020_12() -> None:
+def test_every_schema_document_is_valid_in_its_declared_dialect() -> None:
     documents = sorted(SCHEMA_ROOT.glob("*.schema.json"))
     assert {path.name for path in documents} >= {
         "subject-manifest-v1.schema.json",
@@ -121,14 +121,48 @@ def test_every_schema_document_is_valid_draft_2020_12() -> None:
     identifiers: set[str] = set()
     for path in documents:
         document = json.loads(path.read_text(encoding="utf-8"))
-        Draft202012Validator.check_schema(document)
-        assert document["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+        if path.name == "critic-v1.schema.json":
+            Draft7Validator.check_schema(document)
+            assert document["$schema"] == "http://json-schema.org/draft-07/schema#"
+            assert "definitions" in document and "$defs" not in document
+        else:
+            Draft202012Validator.check_schema(document)
+            assert document["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert document["$id"] not in identifiers
         identifiers.add(document["$id"])
 
 
 def test_packaged_critic_schema_matches_operational_schema() -> None:
     assert schema("critic-v1.schema.json") == critic_schema_document()
+
+
+def test_critic_draft_07_definition_reference_enforces_finding_contract() -> None:
+    selected = Draft7Validator(critic_schema_document())
+    finding: dict[str, object] = {
+        "id": "C1",
+        "severity": "high",
+        "category": "correctness",
+        "file": "src/example.py",
+        "symbol": None,
+        "line_start": 1,
+        "line_end": 1,
+        "problem": "The result is incorrect.",
+        "evidence": "The focused check fails.",
+        "required_fix": "Return the expected value.",
+    }
+    review = {
+        "schema_version": 1,
+        "verdict": "REVISE",
+        "summary": "One correction is required.",
+        "blocked_reason": None,
+        "blocking_findings": [finding],
+        "non_blocking_findings": [],
+    }
+
+    selected.validate(review)
+    del finding["required_fix"]
+    with pytest.raises(ValidationError):
+        selected.validate(review)
 
 
 def test_subject_schema_accepts_actual_regular_and_symlink_serializer_output() -> None:

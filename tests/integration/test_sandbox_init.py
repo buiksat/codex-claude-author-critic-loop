@@ -14,6 +14,7 @@ import pytest
 
 import agent_loop.sandbox_init as sandbox_init_module
 
+from agent_loop.claude_client import build_claude_argv
 from agent_loop.constants import REGULAR_MODE, Limits
 from agent_loop.declassify import KnownSecret
 from agent_loop.errors import AgentLoopError, StopReason
@@ -259,6 +260,43 @@ def test_protocol_rejects_non_allowlisted_environment() -> None:
     with pytest.raises(AgentLoopError) as captured:
         parse_request(json.dumps(value).encode())
     assert captured.value.reason is StopReason.SANDBOX_SETUP_FAILURE
+
+
+def test_protocol_round_trips_claude_empty_tool_argument_but_rejects_empty_executable(
+) -> None:
+    environment = dict(_request("pass").env)
+    environment.update(
+        {
+            "CLAUDE_CODE_DEBUG_LOG_LEVEL": "verbose",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+    )
+    request = replace(
+        _request("pass"),
+        argv=build_claude_argv(model="claude-pinned", effort="high"),
+        env=tuple(sorted(environment.items())),
+        cwd="/runtime/critic-cwd",
+    )
+
+    parsed = parse_request(encode_request(request))
+
+    assert parsed == request
+    assert parsed.argv[parsed.argv.index("--tools") + 1] == ""
+    assert dict(parsed.env)["CLAUDE_CODE_DEBUG_LOG_LEVEL"] == "verbose"
+    assert dict(parsed.env)["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+    for key in (
+        "CLAUDE_CODE_DEBUG_LOG_LEVEL",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    ):
+        broadened = json.loads(encode_request(request))
+        broadened["env"][key] = "0"
+        with pytest.raises(AgentLoopError, match="fixed sandbox value"):
+            parse_request(json.dumps(broadened).encode())
+
+    invalid = replace(request, argv=("", "--version"))
+    with pytest.raises(AgentLoopError, match=r"argv\[0\].*non-empty"):
+        parse_request(encode_request(invalid))
 
 
 def test_protocol_reserves_large_output_only_for_exact_validation_batch() -> None:

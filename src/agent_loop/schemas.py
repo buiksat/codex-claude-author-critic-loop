@@ -111,7 +111,7 @@ def critic_schema_document() -> dict[str, Any]:
         },
     }
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "$id": "https://agent-loop.invalid/schemas/critic-v1.schema.json",
         "title": "agent-loop critic output v1",
         "type": "object",
@@ -136,15 +136,15 @@ def critic_schema_document() -> dict[str, Any]:
             "blocking_findings": {
                 "type": "array",
                 "maxItems": DEFAULT_MAX_FINDINGS,
-                "items": {"$ref": "#/$defs/finding"},
+                "items": {"$ref": "#/definitions/finding"},
             },
             "non_blocking_findings": {
                 "type": "array",
                 "maxItems": DEFAULT_MAX_FINDINGS,
-                "items": {"$ref": "#/$defs/finding"},
+                "items": {"$ref": "#/definitions/finding"},
             },
         },
-        "$defs": {"finding": finding},
+        "definitions": {"finding": finding},
     }
 
 

@@ -11,8 +11,10 @@ from pathlib import Path
 
 import pytest
 
+import agent_loop.claude_managed_policy as claude_managed_policy
 import agent_loop.runtime_adapters as runtime_adapters
 from agent_loop.artifacts import ArtifactStore, ContentAddressedBlobStore
+from agent_loop.claude_managed_policy import ManagedClaudeBoundary
 from agent_loop.constants import Limits
 from agent_loop.credentials import CodexCredentialTransaction, codex_credential_root
 from agent_loop.declassify import declassify_validation
@@ -866,12 +868,14 @@ class ScriptedExecutor:
         self,
         *,
         stdout: bytes,
+        stderr: bytes = b"",
         candidate: SubjectManifest,
         new_blobs: tuple[tuple[str, bytes], ...] = (),
         returncode: int = 0,
         events: list[str] | None = None,
     ) -> None:
         self.stdout = stdout
+        self.stderr = stderr
         self.candidate = candidate
         self.new_blobs = new_blobs
         self.returncode = returncode
@@ -918,7 +922,7 @@ class ScriptedExecutor:
             manifest.fingerprint,
             self.candidate,
             self.new_blobs,
-            PrimaryResult(self.returncode, self.stdout, b"", False, False, 1),
+            PrimaryResult(self.returncode, self.stdout, self.stderr, False, False, 1),
             CleanupResult(0, True),
         )
         process = BoundedProcessResult(
@@ -1378,10 +1382,10 @@ def _claude_envelope() -> bytes:
     return json.dumps(
         {
             "type": "result",
-            "model": "claude-fake",
+            "model": "claude-requested",
             "effort": "high",
             "total_cost_usd": 0.0,
-            "modelUsage": {"claude-fake": {}},
+            "modelUsage": {"claude-requested": {}},
             "structured_output": {
                 "schema_version": 1,
                 "verdict": "LGTM",
@@ -1395,23 +1399,106 @@ def _claude_envelope() -> bytes:
     ).encode()
 
 
+def _claude_api_request_detail(
+    *, model: str = "claude-requested", effort: str = "high"
+) -> bytes:
+    detail = json.dumps(
+        {
+            "model": model,
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": effort},
+            "betas": [],
+        },
+        separators=(",", ":"),
+    ).encode()
+    return (
+        b"2026-07-20T16:42:22.627Z [VERBOSE] [API REQUEST DETAIL] "
+        + detail
+        + b"\n"
+    )
+
+
+def _fake_managed_claude_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> ManagedClaudeBoundary:
+    policy = tmp_path / "managed-policy"
+    policy.mkdir()
+    (policy / claude_managed_policy.MANAGED_CLAUDE_POLICY_FILE).write_text(
+        json.dumps(
+            claude_managed_policy.managed_claude_policy_document(),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="ascii",
+    )
+    helper = tmp_path / "managed-helper"
+    helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(
+        claude_managed_policy,
+        "MANAGED_CLAUDE_POLICY_SOURCE",
+        os.fspath(policy),
+    )
+    monkeypatch.setattr(
+        claude_managed_policy,
+        "MANAGED_CLAUDE_HELPER_SOURCE",
+        os.fspath(helper),
+    )
+    return ManagedClaudeBoundary(
+        policy_mount=SandboxMount(
+            os.fspath(policy),
+            claude_managed_policy.MANAGED_CLAUDE_POLICY_TARGET,
+            read_only=True,
+            closure_sha256=closure_sha256(policy),
+        ),
+        helper_mount=SandboxMount(
+            os.fspath(helper),
+            claude_managed_policy.MANAGED_CLAUDE_HELPER_TARGET,
+            read_only=True,
+            closure_sha256=closure_sha256(helper),
+        ),
+    )
+
+
+def _unchecked_managed_claude_boundary(
+    valid: ManagedClaudeBoundary,
+    *,
+    policy_mount: SandboxMount | None = None,
+    helper_mount: SandboxMount | None = None,
+) -> ManagedClaudeBoundary:
+    boundary = object.__new__(ManagedClaudeBoundary)
+    object.__setattr__(boundary, "policy_mount", policy_mount or valid.policy_mount)
+    object.__setattr__(boundary, "helper_mount", helper_mount or valid.helper_mount)
+    object.__setattr__(boundary, "protocol", valid.protocol)
+    object.__setattr__(boundary, "probe_id", valid.probe_id)
+    return boundary
+
+
 def test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executor = ScriptedExecutor(
         stdout=_claude_envelope(),
+        stderr=_claude_api_request_detail(),
         candidate=SubjectManifest.empty(),
     )
     install = tmp_path / "claude-install"
     config = tmp_path / "claude-config"
     install.mkdir()
     config.mkdir()
+    install_mount = SandboxMount(str(install), "/opt/reviewed-claude")
+    managed_boundary = _fake_managed_claude_boundary(tmp_path, monkeypatch)
     adapter = SandboxedClaudeCriticAdapter(
         executor,  # type: ignore[arg-type]
         "fake-dedicated-token",
-        install_mount=SandboxMount(str(install), "/opt/reviewed-claude"),
+        install_mount=install_mount,
         executable="/opt/reviewed-claude/claude",
         config_dir=config,
+        managed_boundary=managed_boundary,
         model="claude-requested",
         effort="high",
         clock=lambda: 0.0,
@@ -1423,7 +1510,7 @@ def test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts
     )
 
     assert turn.review.verdict is Verdict.LGTM
-    assert turn.observed_model == "claude-fake"
+    assert turn.observed_model == "claude-requested"
     assert turn.observed_effort == "high"
     assert turn.total_cost_usd == 0.0
     call = executor.calls[0]
@@ -1442,13 +1529,73 @@ def test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts
     assert environment["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-dedicated-token"
     assert environment["TMPDIR"] == "/runtime/tmp"
     assert environment["CLAUDE_CODE_TMPDIR"] == "/runtime/critic-tmp"
+    assert environment["CLAUDE_CODE_DEBUG_LOG_LEVEL"] == "verbose"
+    assert environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     mounts = call["mounts"]
     assert isinstance(mounts, tuple)
-    config_mount = next(item for item in mounts if item.target == "/control/claude-home")
+    assert tuple(item.target for item in mounts) == (
+        "/opt/reviewed-claude",
+        "/control/claude-home",
+        claude_managed_policy.MANAGED_CLAUDE_POLICY_TARGET,
+        claude_managed_policy.MANAGED_CLAUDE_HELPER_TARGET,
+    )
+    assert mounts[0] == install_mount
+    config_mount = mounts[1]
     assert config_mount.read_only is True
+    assert config_mount.closure_sha256 is None
+    assert mounts[2:] == (
+        managed_boundary.policy_mount,
+        managed_boundary.helper_mount,
+    )
+    assert all(item.read_only for item in mounts[2:])
+    assert all(item.closure_sha256 is not None for item in mounts[2:])
 
 
-def test_critic_nonzero_attempt_reaches_sink_once_before_client_failure(tmp_path: Path) -> None:
+def test_claude_adapter_cross_checks_api_request_model_against_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = json.loads(_claude_envelope())
+    envelope.pop("model")
+    envelope["modelUsage"] = {"claude-other": {}}
+    executor = ScriptedExecutor(
+        stdout=json.dumps(envelope, separators=(",", ":")).encode(),
+        stderr=_claude_api_request_detail(),
+        candidate=SubjectManifest.empty(),
+    )
+    install = tmp_path / "claude-install"
+    config = tmp_path / "claude-config"
+    install.mkdir()
+    config.mkdir()
+    adapter = SandboxedClaudeCriticAdapter(
+        executor,  # type: ignore[arg-type]
+        "fake-dedicated-token",
+        install_mount=SandboxMount(str(install), "/opt/reviewed-claude"),
+        executable="/opt/reviewed-claude/claude",
+        config_dir=config,
+        managed_boundary=_fake_managed_claude_boundary(tmp_path, monkeypatch),
+        model="claude-requested",
+        effort="high",
+        clock=lambda: 0.0,
+    )
+
+    with pytest.raises(AgentLoopError) as caught:
+        adapter.review(
+            CriticRequest(
+                1,
+                ReviewBundle({}, b"bundle", 2, "a" * 64),
+                ApprovalContext(True, True, True),
+                1_000,
+            )
+        )
+
+    assert caught.value.reason is StopReason.SANDBOX_SETUP_FAILURE
+
+
+def test_critic_nonzero_attempt_reaches_sink_once_before_client_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     attempts: list[tuple[SandboxRole, int, SandboxExecution]] = []
     executor = ScriptedExecutor(
         stdout=_claude_envelope(),
@@ -1465,6 +1612,7 @@ def test_critic_nonzero_attempt_reaches_sink_once_before_client_failure(tmp_path
         install_mount=SandboxMount(str(install), "/opt/reviewed-claude"),
         executable="/opt/reviewed-claude/claude",
         config_dir=config,
+        managed_boundary=_fake_managed_claude_boundary(tmp_path, monkeypatch),
         attempt_sink=lambda role, round_number, execution: attempts.append(
             (role, round_number, execution)
         ),
@@ -1488,7 +1636,10 @@ def test_critic_nonzero_attempt_reaches_sink_once_before_client_failure(tmp_path
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in attempts[0][2].request.environment
 
 
-def test_claude_adapter_rejects_any_empty_subject_mutation(tmp_path: Path) -> None:
+def test_claude_adapter_rejects_any_empty_subject_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = b"unexpected"
     digest = sha256_hex(payload)
     candidate = SubjectManifest.build(
@@ -1509,6 +1660,7 @@ def test_claude_adapter_rejects_any_empty_subject_mutation(tmp_path: Path) -> No
         install_mount=SandboxMount(str(install), "/opt/reviewed-claude"),
         executable="/opt/reviewed-claude/claude",
         config_dir=config,
+        managed_boundary=_fake_managed_claude_boundary(tmp_path, monkeypatch),
         clock=lambda: 0.0,
     )
     with pytest.raises(AgentLoopError) as caught:
@@ -1523,11 +1675,18 @@ def test_claude_adapter_rejects_any_empty_subject_mutation(tmp_path: Path) -> No
     assert caught.value.reason is StopReason.OUT_OF_BAND_CHANGE
 
 
-def test_072_claude_token_encoding_cannot_enter_retained_envelope(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_072_claude_token_encoding_cannot_enter_retained_control_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: str,
+) -> None:
     token = "fake-dedicated-token"
     attempts: list[tuple[SandboxRole, int, SandboxExecution]] = []
+    canary = token.encode().hex().encode()
     executor = ScriptedExecutor(
-        stdout=token.encode().hex().encode(),
+        stdout=canary if stream == "stdout" else _claude_envelope(),
+        stderr=canary if stream == "stderr" else b"",
         candidate=SubjectManifest.empty(),
     )
     install = tmp_path / "claude-install"
@@ -1540,6 +1699,7 @@ def test_072_claude_token_encoding_cannot_enter_retained_envelope(tmp_path: Path
         install_mount=SandboxMount(str(install), "/opt/reviewed-claude"),
         executable="/opt/reviewed-claude/claude",
         config_dir=config,
+        managed_boundary=_fake_managed_claude_boundary(tmp_path, monkeypatch),
         attempt_sink=lambda role, round_number, execution: attempts.append(
             (role, round_number, execution)
         ),
@@ -1556,3 +1716,67 @@ def test_072_claude_token_encoding_cannot_enter_retained_envelope(tmp_path: Path
         )
     assert caught.value.reason is StopReason.CREDENTIAL_REFRESH_FAILURE
     assert attempts == []
+
+
+def test_claude_adapter_rejects_invalid_or_overlapping_managed_boundary_mounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install = tmp_path / "claude-install"
+    config = tmp_path / "claude-config"
+    install.mkdir()
+    config.mkdir()
+    valid = _fake_managed_claude_boundary(tmp_path, monkeypatch)
+
+    def construct(
+        boundary: ManagedClaudeBoundary | None,
+        *,
+        install_target: str = "/opt/reviewed-claude",
+    ) -> SandboxedClaudeCriticAdapter:
+        return SandboxedClaudeCriticAdapter(
+            ScriptedExecutor(
+                stdout=_claude_envelope(),
+                candidate=SubjectManifest.empty(),
+            ),  # type: ignore[arg-type]
+            "fake-dedicated-token",
+            install_mount=SandboxMount(os.fspath(install), install_target),
+            executable=install_target + "/claude",
+            config_dir=config,
+            managed_boundary=boundary,  # type: ignore[arg-type]
+            clock=lambda: 0.0,
+        )
+
+    with pytest.raises(TypeError, match="ManagedClaudeBoundary"):
+        construct(None)
+
+    writable_policy = SandboxMount(
+        valid.policy_mount.source,
+        valid.policy_mount.target,
+        read_only=False,
+    )
+    with pytest.raises(ValueError, match="read-only and closure-witnessed"):
+        construct(
+            _unchecked_managed_claude_boundary(valid, policy_mount=writable_policy)
+        )
+
+    unwitnessed_helper = SandboxMount(
+        valid.helper_mount.source,
+        valid.helper_mount.target,
+        read_only=True,
+    )
+    with pytest.raises(ValueError, match="read-only and closure-witnessed"):
+        construct(
+            _unchecked_managed_claude_boundary(valid, helper_mount=unwitnessed_helper)
+        )
+
+    wrong_target = SandboxMount(
+        valid.policy_mount.source,
+        "/etc/not-claude-code",
+        read_only=True,
+        closure_sha256=valid.policy_mount.closure_sha256,
+    )
+    with pytest.raises(ValueError, match="fixed path"):
+        construct(_unchecked_managed_claude_boundary(valid, policy_mount=wrong_target))
+
+    with pytest.raises(ValueError, match="overlap install or config"):
+        construct(valid, install_target="/etc")

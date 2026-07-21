@@ -28,7 +28,12 @@ from .capabilities import (
     CAPABILITY_RECEIPT_RELATIVE_PATH,
     CapabilityReceiptError,
     LiveCapabilityBinding,
+    ManagedClaudeBoundaryCapabilityBinding,
     verify_live_capability_receipt,
+)
+from .claude_managed_policy import (
+    ManagedClaudeBoundary,
+    inspect_managed_claude_boundary,
 )
 from .codex_client import (
     SanitizedCodexConfig,
@@ -1518,6 +1523,7 @@ class ProductionWorkflowBackend:
 
     def __init__(self) -> None:
         self._install_cache: dict[tuple[str, str, str, str], ReviewedInstall] = {}
+        self._managed_claude_boundary: ManagedClaudeBoundary | None = None
 
     def clock(self) -> float:
         return time.monotonic()
@@ -1589,6 +1595,40 @@ class ProductionWorkflowBackend:
         if selected is None:
             selected = _derive_reviewed_install(preparation, name=name)
             self._install_cache[key] = selected
+        return selected
+
+    def _claude_boundary(self, preparation: RunPreparation) -> ManagedClaudeBoundary:
+        selected = self._managed_claude_boundary
+        if selected is None:
+            try:
+                selected = inspect_managed_claude_boundary()
+            except (OSError, TypeError, ValueError):
+                raise fail(
+                    StopReason.GITLESS_INVOCATION_PROBE_FAILED,
+                    "the fixed administrator-managed Claude boundary is absent or unsafe",
+                ) from None
+        try:
+            for mount in (selected.policy_mount, selected.helper_mount):
+                mounted = Path(mount.source)
+                if any(
+                    _paths_overlap(mounted, private_root)
+                    for private_root in (
+                        preparation.source,
+                        preparation.state_home,
+                        preparation.run_root,
+                    )
+                ):
+                    raise ValueError(
+                        "managed Claude boundary overlaps source or private runner state"
+                    )
+        except (OSError, TypeError, ValueError):
+            raise fail(
+                StopReason.GITLESS_INVOCATION_PROBE_FAILED,
+                "the fixed administrator-managed Claude boundary is absent, unsafe, or overlaps "
+                "private runner authority",
+            ) from None
+        if self._managed_claude_boundary is None:
+            self._managed_claude_boundary = selected
         return selected
 
     def acquire_codex_credential(
@@ -1819,6 +1859,7 @@ class ProductionWorkflowBackend:
             )
             codex_install = self._install(preparation, name="codex")
             claude_install = self._install(preparation, name="claude")
+            managed_boundary = self._claude_boundary(preparation)
             preparation.artifacts.ensure_directory("control/claude-home")
             claude_config = preparation.run_root / "control" / "claude-home"
             validator = SandboxedValidationAdapter(
@@ -1855,6 +1896,7 @@ class ProductionWorkflowBackend:
                 install_mount=claude_install.mount,
                 executable=claude_install.executable,
                 config_dir=claude_config,
+                managed_boundary=managed_boundary,
                 timeout_seconds=config.critic_timeout_seconds,
                 model=config.critic_model,
                 effort=config.critic_effort,
@@ -1879,6 +1921,7 @@ class ProductionWorkflowBackend:
             "codex": self._install(preparation, name="codex"),
             "claude": self._install(preparation, name="claude"),
         }
+        managed_boundary = self._claude_boundary(preparation)
         environment = preparation.environment
         if not isinstance(environment, EnvironmentReport):
             raise fail(
@@ -1900,6 +1943,14 @@ class ProductionWorkflowBackend:
                 author_effort=config.author_effort,
                 critic_model=config.critic_model,
                 critic_effort=config.critic_effort,
+                managed_claude_boundary=ManagedClaudeBoundaryCapabilityBinding(
+                    policy_path=managed_boundary.policy_mount.source,
+                    helper_path=managed_boundary.helper_mount.source,
+                    policy_sha256=managed_boundary.policy_sha256,
+                    helper_sha256=managed_boundary.helper_sha256,
+                    probe_protocol=managed_boundary.protocol,
+                    probe_id=managed_boundary.probe_id,
+                ),
                 codex_install_closure_sha256=installs["codex"].closure_sha256,
                 claude_install_closure_sha256=installs["claude"].closure_sha256,
                 runtime_closure_sha256=installed_runtime_closure_sha256(),

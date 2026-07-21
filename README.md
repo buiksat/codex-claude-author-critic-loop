@@ -7,11 +7,12 @@ stop decisions.
 
 The version-1 implementation paths, portable control plane, executable fake-agent matrix, and
 target-host containment components have broad automated coverage. Qualification is nevertheless
-incomplete: the required Ruff/strict-mypy gates were unavailable, no clean installation was tested,
-and several pinned-CLI behavioral clauses remain unproved. Credentialed
-first-turn/resume/model smoke tests were not run, so the runtime is also intentionally blocked by
-the live capability-receipt gate. No paid model call is required by installation or the normal test
-suite. Do not treat the package as a production security boundary; see
+incomplete: the required Ruff/strict-mypy gates were unavailable, and several pinned-CLI behavioral
+clauses remain unproved. The managed Claude system boundary is installed and passed its no-network
+initialization probe, but credentialed first-turn/resume/model smoke tests were not run, so no live
+capability receipt exists and the runtime remains intentionally blocked. No paid model call is
+required by installation or the normal test suite. Do not treat the package as a production
+security boundary; see
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for current evidence.
 
 ## Frozen support matrix
@@ -60,9 +61,11 @@ the operator must supply that exact build backend through an independently revie
 dependency workflow; these commands do not authorize fetching it. The test suite uses the
 host-provided `pytest` and `jsonschema`; do not fetch tooling implicitly on a production runner.
 
-The source distribution retains `PLAN.md`, `docs/IMPLEMENTATION_STATUS.md`, and `schemas/` at their
-repository-relative paths. A wheel installs the same frozen evidence under
-`share/agent-loop/` beneath the installation prefix.
+The source distribution retains `PLAN.md`, `docs/IMPLEMENTATION_STATUS.md`, `schemas/`, and the
+reviewed `support/managed-claude-boundary/` assets at their repository-relative paths. A wheel
+installs the same frozen evidence and boundary sources under `share/agent-loop/` beneath the
+installation prefix. It does not install the managed policy into `/etc` or the helper into
+`/usr/local`; that remains an explicit administrator action.
 
 ## Credential provisioning
 
@@ -103,6 +106,40 @@ install -m 0600 /secure/input/claude-setup-token \
 The `/secure/input/...` files are operator-managed examples, not ambient CLI locations. Check the
 final ownership and modes before use. The Codex account lock is held across first and resumed turns;
 a validated refresh is atomically reconciled to the durable file.
+
+## Managed Claude administrator boundary
+
+The reviewed assets under `support/managed-claude-boundary/` define the only managed Claude policy
+accepted by production: an exact `/etc/claude-code/managed-settings.json` and a small fixed
+SessionStart attestation helper at
+`/usr/local/libexec/agent-loop-claude-boundary-attest`. Review those sources, then perform the
+non-privileged dry check from the repository root:
+
+```bash
+bash support/managed-claude-boundary/install.sh --check
+```
+
+The check statically compiles the helper and exercises its accepted input, fixed marker, and
+credential-rejection behavior. It does not invoke `sudo`, modify system paths, inspect a credential
+store, or call either model. Once that succeeds, the explicit administrator installation is:
+
+```bash
+bash support/managed-claude-boundary/install.sh
+```
+
+The installer requests privilege through `sudo`; do not invoke the whole script as `sudo bash`. It
+refuses any existing `/etc/claude-code` path or helper target rather than replacing it. It verifies
+and reuses a safe root-owned mode-`0755` `/usr/local/libexec`, creating only that final directory if
+it is absent; it never chmods or chowns an existing shared directory. On a new installation it
+creates the mode-`0755` policy directory, installs the helper mode `0555` and the policy mode `0444`,
+and finishes by running the production boundary inspector over their exact metadata, content, and
+closure hashes. An existing Claude system policy must be reviewed and reconciled by an
+administrator; this script never deletes or silently replaces it.
+
+These commands provision only the non-secret managed boundary. They do not provision the dedicated
+Codex file-auth identity or Claude setup token described above and do not authorize spending. Keep
+`AGENT_LOOP_CONFIRM_PAID_CODEX` and `AGENT_LOOP_CONFIRM_PAID_CLAUDE` unset during installation and
+dry checks.
 
 ## Configuration and commands
 
@@ -228,11 +265,10 @@ export AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID=reviewed-managed-boundary-v1
 python3.14 -m pytest -q tests/host tests/real_cli
 ```
 
-The two `AGENT_LOOP_CONFIRM_PAID_*` variables authorize real model traffic: Codex first-turn and
-exact-resume calls plus a Claude review call. The managed-policy variables are not a substitute for
-the boundary. An administrator must first provision the reviewed managed hook/status/file-suggestion
-process described by the skipped test and make its non-secret attestation available to the exact
-Claude install and system-policy mounts.
+The two `AGENT_LOOP_CONFIRM_PAID_*` variables authorize real, potentially billable model traffic:
+one Codex first-turn call, one exact-resume call, and one Claude review call. Do not export them for
+installation or a dry check. The managed-policy selectors are non-secret identifiers, not a
+substitute for the installed and locally verified boundary.
 
 At pytest session finish, a receipt is written only if target-host gates 8/9/10/11/29/30/71, the
 combined Codex gates 33/65/66, and Claude gate 49 truly pass, including exact observed model/effort
@@ -243,14 +279,17 @@ preflight and re-hashes the exact reviewed Codex and Claude install closures plu
 location-independent runtime Python-source closure before writing:
 
 ```text
-/home/bahram/.local/state/agent-loop/capabilities/live-v1.json
+/home/bahram/.local/state/agent-loop/capabilities/live-v2.json
 ```
 
 The containing directory is mode `0700` and the receipt is mode `0600`. It contains no credential
 bytes. It is valid for at most seven days and binds the exact OS/kernel/Python/Git/systemd/Bash and
 Bubblewrap facts and probes, executable and install-closure hashes, credential identifiers,
-requested models, and requested efforts. Production reconstructs that binding from its current
-preflight; any mismatch, stale timestamp, unsafe metadata, or absent receipt stops before spending.
+requested models and efforts, and the managed Claude policy/helper absolute paths, closure hashes,
+attestation protocol, and fixed probe identifier. Production reconstructs that binding from its
+current preflight; any mismatch, stale timestamp, unsafe metadata, or absent receipt stops before
+spending. Version-1 receipts are neither accepted nor migrated: changing to this boundary requires a
+new successful combined live session to mint `live-v2.json`.
 
 No paid or live model call was run while implementing or documenting this revision, so this work did
 not mint a receipt. Do not set the live gates until all portable, fake-agent, and target-host tests
@@ -350,9 +389,10 @@ python3.14 -m pytest -q -m 'not real_cli'
 python3.14 -m compileall -q src tests
 ```
 
-At this revision, pytest collected 542 tests; 516 portable tests and 22 host-marked tests passed,
-and the combined non-real-CLI selection passed 538 tests. These results do not include the four
-real-CLI nodes. The two non-model Codex probes were also run separately; the credentialed Codex and
+At this revision, pytest collected 617 tests; 590 portable tests and 22 host-marked tests passed,
+and the combined non-real-CLI selection passed 612 tests. That selection excludes all five
+`real_cli`-marked nodes. Two non-model Codex probes and one pinned-Claude canonical-schema probe
+against a process-local fake endpoint were run separately and passed; the credentialed Codex and
 Claude model nodes were not run.
 
 Run target-host checks only on the frozen matrix:
