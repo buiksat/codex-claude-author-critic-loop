@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, Never
+from typing import IO, Any, Final, Never, cast
 
 from .constants import (
     DEFAULT_MAX_AGENT_OUTPUT_BYTES,
@@ -136,7 +136,7 @@ _VALIDATION_BATCH_ENVIRONMENT = {
 
 
 class _X86Registers(ctypes.Structure):
-    _fields_ = [  # noqa: RUF012 - ctypes requires this mutable class descriptor
+    _fields_ = [
         (name, ctypes.c_ulonglong)
         for name in (
             "r15",
@@ -488,9 +488,7 @@ def parse_request(data: bytes) -> SandboxRequest:
         blobs[digest] = decoded
 
     required_blobs = {
-        entry.blob_sha256
-        for entry in manifest.entries
-        if entry.kind is EntryKind.REGULAR
+        entry.blob_sha256 for entry in manifest.entries if entry.kind is EntryKind.REGULAR
     }
     if set(blobs) != required_blobs:
         _protocol_error("blobs must exactly match the regular files referenced by manifest")
@@ -644,7 +642,7 @@ def parse_response(
             _protocol_error("error response reason must be a string")
         try:
             reason = StopReason(reason_value)
-        except ValueError as exc:
+        except ValueError:
             _protocol_error("error response reason is not a known stop reason")
         if not isinstance(detail, str):
             _protocol_error("error response detail must be a string")
@@ -752,23 +750,21 @@ def parse_response(
         if previous_digest is not None and digest <= previous_digest:
             _protocol_error("new_blobs must be uniquely sorted by digest")
         previous_digest = digest
-        blob = _canonical_b64(
+        decoded_blob = _canonical_b64(
             item["data_b64"],
             where=f"new_blobs[{index}].data_b64",
             max_decoded_bytes=request.limits.subject.max_file_bytes,
         )
-        if sha256_hex(blob) != digest:
+        if sha256_hex(decoded_blob) != digest:
             _protocol_error(f"new_blobs[{index}] bytes do not match sha256")
-        total_new_bytes += len(blob)
+        total_new_bytes += len(decoded_blob)
         if total_new_bytes > request.limits.subject.max_total_subject_bytes:
             _protocol_error("new_blobs exceed max_total_subject_bytes")
-        new_blobs[digest] = blob
+        new_blobs[digest] = decoded_blob
 
     input_blobs = dict(request.blobs)
     candidate_digests = {
-        entry.blob_sha256
-        for entry in candidate.entries
-        if entry.kind is EntryKind.REGULAR
+        entry.blob_sha256 for entry in candidate.entries if entry.kind is EntryKind.REGULAR
     }
     expected_new = candidate_digests - set(input_blobs)
     if validation_batch:
@@ -780,10 +776,16 @@ def parse_response(
         if entry.kind is EntryKind.SYMLINK:
             continue
         assert entry.blob_sha256 is not None and entry.size is not None
-        blob = input_blobs.get(entry.blob_sha256, new_blobs.get(entry.blob_sha256))
-        if blob is None and validation_batch:
+        candidate_blob = input_blobs.get(entry.blob_sha256)
+        if candidate_blob is None:
+            candidate_blob = new_blobs.get(entry.blob_sha256)
+        if candidate_blob is None and validation_batch:
             continue
-        if blob is None or len(blob) != entry.size or sha256_hex(blob) != entry.blob_sha256:
+        if (
+            candidate_blob is None
+            or len(candidate_blob) != entry.size
+            or sha256_hex(candidate_blob) != entry.blob_sha256
+        ):
             _protocol_error("candidate regular entry is not backed by verified blob bytes")
 
     return SandboxResult(
@@ -1042,7 +1044,7 @@ def _visible_pids() -> set[int]:
 def _process_parent(pid: int) -> int | None:
     try:
         data = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
-    except (FileNotFoundError, ProcessLookupError):
+    except FileNotFoundError, ProcessLookupError:
         return None
     except OSError as exc:
         raise fail(
@@ -1179,17 +1181,18 @@ def _drain_after_cleanup(
     while selector.get_map() and time.monotonic() < deadline:
         events = selector.select(0.05)
         for key, _mask in events:
+            stream = cast(IO[bytes], key.fileobj)
             if key.data == "stdin":
-                selector.unregister(key.fileobj)
-                key.fileobj.close()
+                selector.unregister(stream)
+                stream.close()
                 continue
             try:
-                chunk = os.read(key.fileobj.fileno(), 65536)
+                chunk = os.read(stream.fileno(), 65536)
             except BlockingIOError:
                 continue
             if not chunk:
-                selector.unregister(key.fileobj)
-                key.fileobj.close()
+                selector.unregister(stream)
+                stream.close()
                 continue
             target = stdout if key.data == "stdout" else stderr
             limited |= _append_bounded(
@@ -1235,21 +1238,19 @@ def _close_primary_resources(
     if not cleanup_failures:
         return
     if primary_error is not None:
-        for resource_name, cleanup_error in cleanup_failures:
+        for resource_name, cleanup_failure in cleanup_failures:
             primary_error.add_note(
-                f"post-spawn {resource_name} close also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"post-spawn {resource_name} close also failed: {type(cleanup_failure).__name__}"
             )
         return
 
-    resource_name, cleanup_error = cleanup_failures[0]
+    resource_name, first_cleanup_error = cleanup_failures[0]
     for secondary_name, secondary_error in cleanup_failures[1:]:
-        cleanup_error.add_note(
-            f"post-spawn {secondary_name} close also failed: "
-            f"{type(secondary_error).__name__}"
+        first_cleanup_error.add_note(
+            f"post-spawn {secondary_name} close also failed: {type(secondary_error).__name__}"
         )
-    cleanup_error.add_note(f"post-spawn cleanup failed while closing {resource_name}")
-    raise cleanup_error
+    first_cleanup_error.add_note(f"post-spawn cleanup failed while closing {resource_name}")
+    raise first_cleanup_error
 
 
 def _run_primary(request: SandboxRequest, workspace: Path) -> tuple[PrimaryResult, CleanupResult]:
@@ -1307,7 +1308,7 @@ def _run_primary(request: SandboxRequest, workspace: Path) -> tuple[PrimaryResul
                 timed_out = True
                 break
             for key, mask in selector.select(min(remaining, 0.05)):
-                stream = key.fileobj
+                stream = cast(IO[bytes], key.fileobj)
                 if key.data == "stdin" and mask & selectors.EVENT_WRITE:
                     try:
                         written = os.write(
@@ -1360,8 +1361,7 @@ def _run_primary(request: SandboxRequest, workspace: Path) -> tuple[PrimaryResul
                 _terminate_descendants(process, grace_ms=request.limits.terminate_grace_ms)
             except BaseException as cleanup_error:
                 error.add_note(
-                    "post-spawn descendant cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
+                    f"post-spawn descendant cleanup also failed: {type(cleanup_error).__name__}"
                 )
         raise
     finally:
@@ -1413,9 +1413,7 @@ def _run_validation_batch(
     for index, check in enumerate(batch.checks):
         remaining_ms = max(0, int((deadline - time.monotonic()) * 1_000))
         if remaining_ms == 0:
-            records.append(
-                ValidationBatchRecord(index, 0, True, False, False, 0, b"", b"")
-            )
+            records.append(ValidationBatchRecord(index, 0, True, False, False, 0, b"", b""))
             break
         child_output_max = min(check.output_max_bytes, max(1, remaining_raw + 1))
         child_limits = replace(
@@ -1555,13 +1553,16 @@ def execute_request(
 
 
 def _json_bytes(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii") + b"\n"
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
 
 
 def encode_result(result: SandboxResult, *, max_bytes: int) -> bytes:

@@ -5,8 +5,8 @@ import pytest
 from agent_loop.errors import AgentLoopError, StopReason, fail
 from agent_loop.service import (
     BoundedProcessInterrupted,
-    BoundedProcessStartFailure,
     BoundedProcessResult,
+    BoundedProcessStartFailure,
     ServiceLimits,
     TransientServiceRunner,
     _systemd_timespan_usec,
@@ -102,12 +102,8 @@ def _install_fake_live_unit(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         lambda _unit: {"ControlGroup": "/user.slice/fake.service"},
     )
     monkeypatch.setattr("agent_loop.service._verify_properties", lambda *_args: None)
-    monkeypatch.setattr(
-        "agent_loop.service._kill_unit", lambda unit: killed.append(unit)
-    )
-    monkeypatch.setattr(
-        "agent_loop.service._wait_for_cgroup_empty", lambda *_args, **_kwargs: True
-    )
+    monkeypatch.setattr("agent_loop.service._kill_unit", lambda unit: killed.append(unit))
+    monkeypatch.setattr("agent_loop.service._wait_for_cgroup_empty", lambda *_args, **_kwargs: True)
     return killed
 
 
@@ -122,9 +118,7 @@ def test_output_limit_returns_bounded_prefix_after_forced_unit_cleanup(
         return _bounded_result(output_limited=True)
 
     monkeypatch.setattr("agent_loop.service.run_bounded_process", fake_process)
-    result = TransientServiceRunner().run(
-        ("/usr/bin/true",), role="output", timeout_seconds=1
-    )
+    result = TransientServiceRunner().run(("/usr/bin/true",), role="output", timeout_seconds=1)
     assert result.process.output_limited is True
     assert result.process.stdout == b"partial"
     assert len(killed) == 1
@@ -216,11 +210,7 @@ def test_bounded_process_waits_for_stdio_closed_child_or_reports_real_timeout(
     expected_timeout: bool,
     expected_returncode: int,
 ) -> None:
-    program = (
-        "import os,time;"
-        "os.close(0);os.close(1);os.close(2);"
-        f"time.sleep({sleep_seconds!r})"
-    )
+    program = f"import os,time;os.close(0);os.close(1);os.close(2);time.sleep({sleep_seconds!r})"
     result = run_bounded_process(
         ("/usr/bin/python3", "-c", program),
         timeout_seconds=timeout_seconds,

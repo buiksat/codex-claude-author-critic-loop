@@ -1,8 +1,8 @@
 import pytest
+from tests.real_cli.live_support import selected_host_preflight_executables
 
 from agent_loop.preflight import _run_small_in_service, run_preflight
 from agent_loop.service import TransientServiceRunner
-from tests.real_cli.live_support import selected_host_preflight_executables
 
 
 @pytest.mark.host
@@ -22,6 +22,7 @@ def test_pinned_environment_preflight_without_model_calls() -> None:
     assert report.openat2
     assert report.namespace_probe
     assert report.transient_service_probe
+    assert report.author_service.broker_probe
     assert report.codex.version == "codex-cli 0.144.6"
     assert report.claude.version == "2.1.215 (Claude Code)"
     assert report.codex.requested_path == str(codex_path)

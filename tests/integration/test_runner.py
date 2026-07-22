@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import base64
-import subprocess  # noqa: S404 - publication guard patches process creation
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from tests.fakes.runner_harness import (
+    FakeAuthor,
+    FakeClock,
+    FakeCritic,
+    FakeJournal,
+    FakeValidator,
+    MemoryBlobStore,
+    blocked_review,
+    lgtm_review,
+    manifest_from_files,
+    revise_review,
+)
 
 import agent_loop.runner as runner_module
 from agent_loop.artifacts import ArtifactStore
@@ -29,20 +41,7 @@ from agent_loop.runner import (
     ValidationTurn,
 )
 from agent_loop.schemas import CriticReview, Verdict
-from agent_loop.validation import ClassifiedCheck, CheckExecution, ValidationSummary
-from tests.fakes.runner_harness import (
-    FakeAuthor,
-    FakeClock,
-    FakeCritic,
-    FakeJournal,
-    FakeValidator,
-    MemoryBlobStore,
-    blocked_review,
-    lgtm_review,
-    manifest_from_files,
-    revise_review,
-)
-
+from agent_loop.validation import CheckExecution, ClassifiedCheck, ValidationSummary
 
 TASK = "Implement the deterministic requested feature."
 _CROSS_AGENT_SECRET = b"CrossAgentSecret42"
@@ -370,6 +369,7 @@ def test_decoded_critic_secret_has_a_withheld_attempt_but_no_accepted_review(
         )
 
     assert result.stop_reason is StopReason.CREDENTIAL_REFRESH_FAILURE
+    assert isinstance(attempt, dict)
     assert attempt["content_withheld"] is True
     assert not (root / "artifacts" / "rounds" / "001" / "critic.json").exists()
     for path in root.rglob("*"):
@@ -555,6 +555,7 @@ def test_validation_summary_fingerprint_credential_is_substituted_in_attempt(
         )
 
     assert result.stop_reason is StopReason.CREDENTIAL_REFRESH_FAILURE
+    assert isinstance(attempt, dict)
     assert attempt["summary_withheld"] is True
     assert attempt["subject_fingerprint"] == "0" * 64
     for path in root.rglob("*"):
@@ -784,6 +785,7 @@ def test_post_validation_terminal_prefix_is_journaled_with_its_typed_reason() ->
 
         def validate(self, request: ValidationRequest) -> ValidationTurn:
             self.calls += 1
+            checks: tuple[CheckExecution, ...]
             if self.calls == 1:
                 checks = (
                     CheckExecution("build", "build", 1.0, 2.0, 0),
@@ -1156,8 +1158,7 @@ def test_068_predeclared_opaque_delta_requires_counterfactual_validation_proof()
 
     assert result.exit_code is ExitCode.SUCCESS
     proofs = [
-        (round_number, equivalent)
-        for round_number, _, _, equivalent in journal.opaque_proofs
+        (round_number, equivalent) for round_number, _, _, equivalent in journal.opaque_proofs
     ]
     assert proofs == [
         (None, True),
@@ -1200,8 +1201,7 @@ def test_068_opaque_delta_that_changes_validation_behavior_stops_before_critic()
     assert result.exit_code is ExitCode.INTEGRITY_FAILURE
     assert result.stop_reason is StopReason.REVIEW_CONTENT_WITHHELD
     proofs = [
-        (round_number, equivalent)
-        for round_number, _, _, equivalent in journal.opaque_proofs
+        (round_number, equivalent) for round_number, _, _, equivalent in journal.opaque_proofs
     ]
     assert proofs == [
         (None, True),

@@ -146,6 +146,7 @@ def test_withhold_marker_precedes_interrupted_erasure_and_allows_retry(
     with ArtifactStore.create(root) as artifacts:
         artifacts.write_bytes("first.log", b"first retained bytes")
         artifacts.write_bytes("nested/second.log", b"second retained bytes")
+
         def interrupting_erase(directory_fd: int) -> None:
             markers = [
                 path for path in control_root.iterdir() if path.name.startswith("withheld-v1-")
@@ -179,9 +180,7 @@ def test_withhold_marker_precedes_interrupted_erasure_and_allows_retry(
         reopened.withhold_all_content()
 
     assert list(root.iterdir()) == []
-    markers = [
-        path for path in control_root.iterdir() if path.name.startswith("withheld-v1-")
-    ]
+    markers = [path for path in control_root.iterdir() if path.name.startswith("withheld-v1-")]
     assert len(markers) == 1
     assert markers[0].read_bytes() == b""
     assert markers[0].stat().st_mode & 0o777 == 0o600
@@ -195,16 +194,15 @@ def test_withholding_latch_is_outside_run_and_cannot_collide_with_token_path(
 
     with ArtifactStore.create(root) as artifacts:
         artifacts.write_bytes("safe.log", b"safe")
-        assert artifacts.scrub_known_secrets(
-            (KnownSecret("marker-collision", old_marker_token),)
-        ) is False
+        assert (
+            artifacts.scrub_known_secrets((KnownSecret("marker-collision", old_marker_token),))
+            is False
+        )
         artifacts.withhold_all_content()
 
     assert list(root.iterdir()) == []
     control_root = tmp_path / ".agent-loop-artifact-control"
-    markers = [
-        path for path in control_root.iterdir() if path.name.startswith("withheld-v1-")
-    ]
+    markers = [path for path in control_root.iterdir() if path.name.startswith("withheld-v1-")]
     assert len(markers) == 1
 
 

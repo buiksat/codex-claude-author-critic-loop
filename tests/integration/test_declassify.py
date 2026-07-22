@@ -1,13 +1,13 @@
 import base64
 
+from tests.unit.test_validation import summary
+
 from agent_loop.declassify import (
     KnownSecret,
     declassify_validation,
     raw_log_contains_known_secret,
 )
 from agent_loop.validation import classify_validations
-
-from tests.unit.test_validation import summary
 
 
 def test_026_test_failure_feedback() -> None:

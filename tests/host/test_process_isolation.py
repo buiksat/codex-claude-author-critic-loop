@@ -15,6 +15,16 @@ from agent_loop.sandbox import SandboxMount, SandboxPolicy, build_bwrap_argv
 from agent_loop.sandbox_init import SandboxRequest, SupervisorLimits, encode_request
 
 
+def _object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _string(value: object) -> str:
+    assert isinstance(value, str)
+    return value
+
+
 _ISOLATION_PROBE = r"""
 import errno, fcntl, json, os, resource
 from pathlib import Path
@@ -151,8 +161,7 @@ print(json.dumps(result, sort_keys=True))
 """
 
 
-_PRIMARY_PARENT_PROBE = (
-    r"""
+_PRIMARY_PARENT_PROBE = r"""
 import ctypes, json, os, pathlib, subprocess
 
 libc = ctypes.CDLL(None, use_errno=True)
@@ -174,7 +183,6 @@ result["parent_dumpable"] = parent_dumpable
 result["parent_held_sentinel"] = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "parent-secret"
 pathlib.Path("isolation.json").write_text(json.dumps(result, sort_keys=True))
 """.replace("CHILD_CODE", repr(_UNTRUSTED_CHILD_PROBE))
-)
 
 
 def _request(
@@ -186,8 +194,7 @@ def _request(
         manifest=SubjectManifest.empty(),
         blobs=(),
         argv=("/usr/bin/python3", "-c", code),
-        env=env
-        or (("HOME", "/runtime/home"), ("LANG", "C.UTF-8"), ("PATH", "/usr/bin:/bin")),
+        env=env or (("HOME", "/runtime/home"), ("LANG", "C.UTF-8"), ("PATH", "/usr/bin:/bin")),
         cwd="/workspace",
         stdin_bytes=b"",
         limits=SupervisorLimits(
@@ -206,9 +213,7 @@ def _request(
 
 def _run_probe(request: SandboxRequest | None = None) -> dict[str, object]:
     source = Path("src").resolve()
-    policy = SandboxPolicy.validation(
-        mounts=(SandboxMount(os.fspath(source), "/opt/agent-loop"),)
-    )
+    policy = SandboxPolicy.validation(mounts=(SandboxMount(os.fspath(source), "/opt/agent-loop"),))
     command = (
         "/usr/bin/env",
         "PYTHONPATH=/opt/agent-loop",
@@ -219,45 +224,53 @@ def _run_probe(request: SandboxRequest | None = None) -> dict[str, object]:
     completed = subprocess.run(
         build_bwrap_argv(policy, command),
         input=encode_request(request or _request()),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         close_fds=True,
         check=False,
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "backslashreplace")
-    response = json.loads(completed.stdout)
+    decoded: object = json.loads(completed.stdout)
+    response = _object(decoded)
     assert response["kind"] == "result"
-    entries = {
-        base64.b64decode(entry["path_b64"]): entry
-        for entry in response["candidate_manifest"]["entries"]
-    }
-    blobs = {
-        blob["sha256"]: base64.b64decode(blob["data_b64"])
-        for blob in response["new_blobs"]
-    }
-    return json.loads(blobs[entries[b"isolation.json"]["blob_sha256"]])
+    candidate_manifest = _object(response["candidate_manifest"])
+    raw_entries = candidate_manifest["entries"]
+    assert isinstance(raw_entries, list)
+    entries: dict[bytes, dict[str, object]] = {}
+    for value in raw_entries:
+        entry = _object(value)
+        entries[base64.b64decode(_string(entry["path_b64"]))] = entry
+    raw_blobs = response["new_blobs"]
+    assert isinstance(raw_blobs, list)
+    blobs: dict[str, bytes] = {}
+    for value in raw_blobs:
+        blob = _object(value)
+        blobs[_string(blob["sha256"])] = base64.b64decode(_string(blob["data_b64"]))
+    result: object = json.loads(blobs[_string(entries[b"isolation.json"]["blob_sha256"])])
+    return _object(result)
 
 
 @pytest.mark.host
 def test_030_proc_parent_environment_descriptors_and_memory_are_denied() -> None:
     result = _run_probe()
     for name in ("proc_environ", "proc_fds", "proc_mem"):
-        assert result[name]["allowed"] is False
-        assert result[name]["errno"] in {errno.EPERM, errno.EACCES}
+        observation = _object(result[name])
+        assert observation["allowed"] is False
+        assert observation["errno"] in {errno.EPERM, errno.EACCES}
 
 
 @pytest.mark.host
 def test_030_ptrace_process_vm_and_pidfd_getfd_are_denied() -> None:
     result = _run_probe()
     for name in ("ptrace", "process_vm_readv", "pidfd_getfd"):
-        if result[name]["errno"] == errno.ENOSYS:
+        observation = _object(result[name])
+        if observation["errno"] == errno.ENOSYS:
             pytest.xfail(
                 f"blocked: host kernel cannot prove {name} denial because syscall is absent"
             )
-        assert result[name]["allowed"] is False
-        assert result[name]["errno"] in {errno.EPERM, errno.EACCES}
+        assert observation["allowed"] is False
+        assert observation["errno"] in {errno.EPERM, errno.EACCES}
 
 
 @pytest.mark.host
@@ -285,16 +298,18 @@ def test_030_untrusted_child_cannot_introspect_trusted_primary_parent() -> None:
     assert result["child_returncode"] == 0, result["child_stderr"]
     assert result["child_environment_keys"] == ["HOME", "LANG", "PATH"]
     for name in ("parent_environ", "parent_fds", "parent_mem"):
-        assert result[name]["allowed"] is False
-        assert result[name]["errno"] in {errno.EPERM, errno.EACCES}
+        observation = _object(result[name])
+        assert observation["allowed"] is False
+        assert observation["errno"] in {errno.EPERM, errno.EACCES}
     for name in (
         "parent_ptrace",
         "parent_process_vm_readv",
         "parent_pidfd_getfd",
     ):
-        if result[name]["errno"] == errno.ENOSYS:
+        observation = _object(result[name])
+        if observation["errno"] == errno.ENOSYS:
             pytest.xfail(
                 f"blocked: host kernel cannot prove {name} denial because syscall is absent"
             )
-        assert result[name]["allowed"] is False
-        assert result[name]["errno"] in {errno.EPERM, errno.EACCES}
+        assert observation["allowed"] is False
+        assert observation["errno"] in {errno.EPERM, errno.EACCES}

@@ -72,12 +72,6 @@ class ApprovalContext:
 def critic_schema_document() -> dict[str, Any]:
     """Return the exact closed JSON Schema passed to the pinned Claude CLI."""
 
-    nullable_text = {
-        "anyOf": [
-            {"type": "null"},
-            {"type": "string", "minLength": 1, "maxLength": DEFAULT_MAX_FIELD_BYTES},
-        ]
-    }
     finding = {
         "type": "object",
         "additionalProperties": False,
@@ -110,84 +104,74 @@ def critic_schema_document() -> dict[str, Any]:
             },
         },
     }
-    verdict_invariants = [
-        {
-            "if": {
-                "properties": {"verdict": {"const": "LGTM"}},
-                "required": ["verdict"],
-            },
-            "then": {
-                "properties": {
-                    "blocked_reason": {"type": "null"},
-                    "blocking_findings": {"type": "array", "maxItems": 0},
-                }
-            },
-        },
-        {
-            "if": {
-                "properties": {"verdict": {"const": "REVISE"}},
-                "required": ["verdict"],
-            },
-            "then": {
-                "properties": {
-                    "blocked_reason": {"type": "null"},
-                    "blocking_findings": {"type": "array", "minItems": 1},
-                }
-            },
-        },
-        {
-            "if": {
-                "properties": {"verdict": {"const": "BLOCKED"}},
-                "required": ["verdict"],
-            },
-            "then": {
-                "properties": {
-                    "blocked_reason": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": DEFAULT_MAX_FIELD_BYTES,
-                        "pattern": r"\S",
-                    },
-                    "blocking_findings": {"type": "array", "maxItems": 0},
-                }
-            },
-        },
+    required_review_fields = [
+        "schema_version",
+        "verdict",
+        "summary",
+        "blocked_reason",
+        "blocking_findings",
+        "non_blocking_findings",
     ]
+
+    def review_shape(verdict: Verdict) -> dict[str, Any]:
+        blocked_reason: dict[str, Any] = {"type": "null"}
+        blocking_findings: dict[str, Any] = {
+            "type": "array",
+            "maxItems": DEFAULT_MAX_FINDINGS,
+            "items": {"$ref": "#/definitions/finding"},
+        }
+        if verdict is Verdict.REVISE:
+            blocking_findings["minItems"] = 1
+        elif verdict is Verdict.BLOCKED:
+            blocked_reason = {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": DEFAULT_MAX_FIELD_BYTES,
+                "pattern": r"\S",
+            }
+            blocking_findings["maxItems"] = 0
+        else:
+            blocking_findings["maxItems"] = 0
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": required_review_fields,
+            "properties": {
+                "schema_version": {"const": CRITIC_SCHEMA_VERSION},
+                "verdict": {"const": verdict.value},
+                "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": DEFAULT_MAX_FIELD_BYTES,
+                },
+                "blocked_reason": blocked_reason,
+                "blocking_findings": blocking_findings,
+                "non_blocking_findings": {
+                    "type": "array",
+                    "maxItems": DEFAULT_MAX_FINDINGS,
+                    "items": {"$ref": "#/definitions/finding"},
+                },
+            },
+        }
+
+    # Claude Code forwards this document verbatim as the synthetic
+    # StructuredOutput tool's input_schema. The Messages API requires a plain
+    # top-level object and rejects root ``anyOf``/``oneOf``/``allOf``. A closed
+    # wrapper keeps that root API-compatible while the nested discriminator
+    # constrains Claude to one complete canonical verdict shape. The local
+    # parser independently revalidates the same invariants after the CLI returns.
     return {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "$id": "https://agent-loop.invalid/schemas/critic-v1.schema.json",
         "title": "agent-loop critic output v1",
         "type": "object",
         "additionalProperties": False,
-        "required": [
-            "schema_version",
-            "verdict",
-            "summary",
-            "blocked_reason",
-            "blocking_findings",
-            "non_blocking_findings",
-        ],
+        "required": ["review"],
         "properties": {
-            "schema_version": {"const": CRITIC_SCHEMA_VERSION},
-            "verdict": {"enum": ["LGTM", "REVISE", "BLOCKED"]},
-            "summary": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": DEFAULT_MAX_FIELD_BYTES,
-            },
-            "blocked_reason": nullable_text,
-            "blocking_findings": {
-                "type": "array",
-                "maxItems": DEFAULT_MAX_FINDINGS,
-                "items": {"$ref": "#/definitions/finding"},
-            },
-            "non_blocking_findings": {
-                "type": "array",
-                "maxItems": DEFAULT_MAX_FINDINGS,
-                "items": {"$ref": "#/definitions/finding"},
-            },
+            "review": {
+                "anyOf": [review_shape(verdict) for verdict in Verdict],
+            }
         },
-        "allOf": verdict_invariants,
         "definitions": {"finding": finding},
     }
 
@@ -239,16 +223,21 @@ def parse_json_object(
 
 
 def extract_structured_output(envelope_data: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Parse the complete Claude envelope, then extract only its top-level review."""
+    """Parse the complete Claude envelope, then unwrap exactly ``structured_output.review``."""
 
     envelope = parse_json_object(envelope_data)
     if envelope.get("is_error") is True or envelope.get("type") == "error":
         _invalid("Claude returned an error envelope")
     if "structured_output" not in envelope:
         _invalid("Claude envelope has no top-level structured_output")
-    review = envelope["structured_output"]
-    if not isinstance(review, dict):
+    structured_output = envelope["structured_output"]
+    if not isinstance(structured_output, dict):
         _invalid("structured_output must be an object")
+    if set(structured_output) != {"review"}:
+        _invalid("structured_output must contain exactly the review property")
+    review = structured_output["review"]
+    if not isinstance(review, dict):
+        _invalid("structured_output.review must be an object")
     return envelope, review
 
 
@@ -382,6 +371,8 @@ def validate_critic_review(
     ):
         _invalid("unsupported critic schema_version")
     verdict_raw = _string(raw["verdict"], where="structured_output.verdict")
+    if verdict_raw is None:
+        _invalid("verdict cannot be null")
     try:
         verdict = Verdict(verdict_raw)
     except ValueError:

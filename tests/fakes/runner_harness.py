@@ -216,7 +216,10 @@ class FakeCritic:
         return CriticTurn(
             review=review,
             completed_at=completion,
-            envelope={"type": "result", "structured_output": {"verdict": review.verdict.value}},
+            envelope={
+                "type": "result",
+                "structured_output": {"review": {"verdict": review.verdict.value}},
+            },
             total_cost_usd=0.0,
             observed_model="fake-critic-model",
             observed_effort="high",
@@ -267,9 +270,7 @@ class FakeJournal:
                 bool,
             ]
         ] = []
-        self.opaque_proofs: list[
-            tuple[int | None, SubjectManifest, ValidationTurn, bool]
-        ] = []
+        self.opaque_proofs: list[tuple[int | None, SubjectManifest, ValidationTurn, bool]] = []
         self.author_attempts: list[tuple[int, AuthorTurn, int, bool]] = []
         self.critic_attempts: list[tuple[int, CriticTurn, int, bool]] = []
         self.authors: list[AuthorJournalRecord] = []
@@ -345,9 +346,7 @@ class FakeJournal:
         max_output_bytes: int,
         content_withheld: bool,
     ) -> None:
-        self.author_attempts.append(
-            (round_number, turn, max_output_bytes, content_withheld)
-        )
+        self.author_attempts.append((round_number, turn, max_output_bytes, content_withheld))
 
     def critic_attempt(
         self,
@@ -356,9 +355,7 @@ class FakeJournal:
         max_output_bytes: int,
         content_withheld: bool,
     ) -> None:
-        self.critic_attempts.append(
-            (round_number, turn, max_output_bytes, content_withheld)
-        )
+        self.critic_attempts.append((round_number, turn, max_output_bytes, content_withheld))
 
     def author(
         self,
@@ -389,9 +386,7 @@ class FakeJournal:
         evidence: ValidationCriticEvidence,
         classified: tuple[ClassifiedCheck, ...],
     ) -> None:
-        self.validations.append(
-            ValidationJournalRecord(round_number, turn, evidence, classified)
-        )
+        self.validations.append(ValidationJournalRecord(round_number, turn, evidence, classified))
 
     def critic(self, round_number: int, turn: CriticTurn, bundle: ReviewBundle) -> None:
         self.critics.append(CriticJournalRecord(round_number, turn, bundle))

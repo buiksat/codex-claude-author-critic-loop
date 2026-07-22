@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import selectors
 import shutil
 import subprocess
 import sys
@@ -11,9 +12,19 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.fakes.runner_harness import (
+    FakeAuthor,
+    FakeClock,
+    FakeCritic,
+    FakeJournal,
+    FakeValidator,
+    MemoryBlobStore,
+    lgtm_review,
+    manifest_from_files,
+    revise_review,
+)
 
 import agent_loop.sandbox_init as sandbox_init_module
-
 from agent_loop.claude_client import build_claude_argv
 from agent_loop.constants import REGULAR_MODE, Limits
 from agent_loop.declassify import KnownSecret
@@ -22,9 +33,10 @@ from agent_loop.manifests import SubjectManifest, reconcile_candidate
 from agent_loop.models import EntryKind, ManifestEntry, PathPolicy, sha256_hex
 from agent_loop.runner import LoopRunner, LoopSettings, _manifest_contains_known_secret
 from agent_loop.sandbox_init import (
-    CleanupResult,
     MIN_PROTOCOL_EXPORT_BYTES,
+    CleanupResult,
     PrimaryResult,
+    SandboxErrorResponse,
     SandboxRequest,
     SandboxResult,
     SupervisorLimits,
@@ -42,17 +54,21 @@ from agent_loop.validation_batch import (
     encode_validation_batch_request,
     parse_validation_batch_result,
 )
-from tests.fakes.runner_harness import (
-    FakeAuthor,
-    FakeClock,
-    FakeCritic,
-    FakeJournal,
-    FakeValidator,
-    MemoryBlobStore,
-    lgtm_review,
-    manifest_from_files,
-    revise_review,
-)
+
+
+def _object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _json_object(data: bytes) -> dict[str, object]:
+    value: object = json.loads(data)
+    return _object(value)
+
+
+def _string(value: object) -> str:
+    assert isinstance(value, str)
+    return value
 
 
 def _request(
@@ -122,15 +138,14 @@ sys.stdout.buffer.write(encode_result(result, max_bytes=request.limits.max_expor
     completed = subprocess.run(
         (sys.executable, "-c", script, os.fspath(workspace)),
         input=encode_request(request),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env=environment,
         close_fds=True,
         check=False,
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "backslashreplace")
-    return json.loads(completed.stdout)
+    return _json_object(completed.stdout)
 
 
 def _run_direct_outcome(workspace: Path, request: SandboxRequest) -> dict[str, object]:
@@ -151,8 +166,7 @@ else:
     completed = subprocess.run(
         (sys.executable, "-c", script, os.fspath(workspace)),
         input=encode_request(request),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "PYTHONPATH": os.path.abspath("src"),
@@ -163,7 +177,7 @@ else:
         timeout=10,
     )
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "backslashreplace")
-    return json.loads(completed.stdout)
+    return _json_object(completed.stdout)
 
 
 @pytest.fixture
@@ -220,10 +234,7 @@ def _candidate_and_blobs(
 def _decoded_new_blobs(result: dict[str, object]) -> dict[str, bytes]:
     raw = result["new_blobs"]
     assert isinstance(raw, list)
-    return {
-        item["sha256"]: base64.b64decode(item["data_b64"], validate=True)
-        for item in raw
-    }
+    return {item["sha256"]: base64.b64decode(item["data_b64"], validate=True) for item in raw}
 
 
 def test_protocol_rejects_duplicate_and_unknown_properties() -> None:
@@ -262,8 +273,7 @@ def test_protocol_rejects_non_allowlisted_environment() -> None:
     assert captured.value.reason is StopReason.SANDBOX_SETUP_FAILURE
 
 
-def test_protocol_round_trips_claude_empty_tool_argument_but_rejects_empty_executable(
-) -> None:
+def test_protocol_round_trips_claude_empty_tool_argument_but_rejects_empty_executable() -> None:
     environment = dict(_request("pass").env)
     environment.update(
         {
@@ -407,7 +417,7 @@ def test_primary_post_spawn_setup_failure_terminates_and_closes_child(
 
     monkeypatch.setattr(sandbox_init_module, "_prepare_supervisor", lambda: None)
     monkeypatch.setattr(
-        sandbox_init_module.subprocess,
+        subprocess,
         "Popen",
         lambda *_args, **_kwargs: process,
     )
@@ -432,7 +442,7 @@ def test_primary_post_spawn_setup_failure_terminates_and_closes_child(
     def fail_setup(_descriptor: int, _blocking: bool) -> None:
         raise injected
 
-    monkeypatch.setattr(sandbox_init_module.os, "set_blocking", fail_setup)
+    monkeypatch.setattr(os, "set_blocking", fail_setup)
 
     with pytest.raises(type(injected)):
         sandbox_init_module._run_primary(_request("pass"), tmp_path)
@@ -484,7 +494,7 @@ def test_primary_cleanup_failures_do_not_replace_active_interruption(
     terminated: list[FakeProcess] = []
     monkeypatch.setattr(sandbox_init_module, "_prepare_supervisor", lambda: None)
     monkeypatch.setattr(
-        sandbox_init_module.subprocess,
+        subprocess,
         "Popen",
         lambda *_args, **_kwargs: process,
     )
@@ -493,9 +503,9 @@ def test_primary_cleanup_failures_do_not_replace_active_interruption(
         "_harden_primary_after_exec",
         lambda _process: None,
     )
-    monkeypatch.setattr(sandbox_init_module.os, "set_blocking", lambda *_args: None)
+    monkeypatch.setattr(os, "set_blocking", lambda *_args: None)
     monkeypatch.setattr(
-        sandbox_init_module.selectors,
+        selectors,
         "DefaultSelector",
         FakeSelector,
     )
@@ -568,7 +578,7 @@ def test_primary_cleanup_failure_is_fatal_after_successful_execution(
     process = FakeProcess()
     monkeypatch.setattr(sandbox_init_module, "_prepare_supervisor", lambda: None)
     monkeypatch.setattr(
-        sandbox_init_module.subprocess,
+        subprocess,
         "Popen",
         lambda *_args, **_kwargs: process,
     )
@@ -577,9 +587,9 @@ def test_primary_cleanup_failure_is_fatal_after_successful_execution(
         "_harden_primary_after_exec",
         lambda _process: None,
     )
-    monkeypatch.setattr(sandbox_init_module.os, "set_blocking", lambda *_args: None)
+    monkeypatch.setattr(os, "set_blocking", lambda *_args: None)
     monkeypatch.setattr(
-        sandbox_init_module.selectors,
+        selectors,
         "DefaultSelector",
         FakeSelector,
     )
@@ -612,8 +622,7 @@ def test_protocol_error_response_remains_within_minimum_export_cap() -> None:
     completed = subprocess.run(
         (sys.executable, "-m", "agent_loop.sandbox_init"),
         input=malformed,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "PYTHONPATH": os.path.abspath("src"),
@@ -641,17 +650,19 @@ def test_009_materialize_run_cleanup_then_complete_export(tmp_path: Path) -> Non
     )
     result = _run_direct(workspace, _request(code, files={b"input.txt": b"base"}))
     assert result["kind"] == "result"
-    assert result["process"]["returncode"] == 0
-    assert base64.b64decode(result["process"]["stdout_b64"]) == b"done\n"
-    assert result["cleanup"] == {
+    process = _object(result["process"])
+    cleanup = _object(result["cleanup"])
+    assert process["returncode"] == 0
+    assert base64.b64decode(_string(process["stdout_b64"])) == b"done\n"
+    assert cleanup == {
         "export_started_after_cleanup": True,
         "namespace_empty": True,
         "terminated_pids": 0,
     }
-    paths = {
-        base64.b64decode(entry["path_b64"])
-        for entry in result["candidate_manifest"]["entries"]
-    }
+    candidate_manifest = _object(result["candidate_manifest"])
+    entries = candidate_manifest["entries"]
+    assert isinstance(entries, list)
+    paths = {base64.b64decode(_string(_object(entry)["path_b64"])) for entry in entries}
     assert paths == {b"ignored.cache", b"output.txt"}
     assert set(_decoded_new_blobs(result).values()) == {b"authoritative", b"base-changed"}
 
@@ -673,9 +684,7 @@ def test_phase3_configurable_executable_mutation_matrix_crosses_real_export_and_
 
     allowed, _allowed_blobs = execute("allowed")
     allowed_result = reconcile_candidate(SubjectManifest.empty(), allowed, PathPolicy())
-    assert [change.new_path for change in allowed_result.semantic_changes] == [
-        b"src/allowed.txt"
-    ]
+    assert [change.new_path for change in allowed_result.semantic_changes] == [b"src/allowed.txt"]
 
     protected, _protected_blobs = execute("protected")
     with pytest.raises(AgentLoopError) as protected_error:
@@ -912,9 +921,11 @@ def test_primary_stdin_and_nonzero_exit_are_captured_before_export(tmp_path: Pat
         "print('failure-detail', file=sys.stderr); raise SystemExit(7)"
     )
     result = _run_direct(workspace, _request(code, stdin=b"input-data"))
-    assert result["process"]["returncode"] == 7
-    assert base64.b64decode(result["process"]["stderr_b64"]) == b"failure-detail\n"
-    assert result["cleanup"]["namespace_empty"] is True
+    process = _object(result["process"])
+    cleanup = _object(result["cleanup"])
+    assert process["returncode"] == 7
+    assert base64.b64decode(_string(process["stderr_b64"])) == b"failure-detail\n"
+    assert cleanup["namespace_empty"] is True
     assert b"input-data" in _decoded_new_blobs(result).values()
 
 
@@ -969,8 +980,8 @@ def test_primary_post_exec_hardening_supports_native_and_shell_images(
     request = replace(_request("pass"), argv=argv)
     result = _run_direct(workspace, request)
     assert result["kind"] == "result"
-    assert result["process"]["returncode"] == 0
-    assert result["cleanup"]["namespace_empty"] is True
+    assert _object(result["process"])["returncode"] == 0
+    assert _object(result["cleanup"])["namespace_empty"] is True
 
 
 def test_029_setsid_descendant_is_killed_and_reaped_before_export(tmp_path: Path) -> None:
@@ -988,9 +999,12 @@ while not pathlib.Path('daemon.pid').exists():
     time.sleep(0.001)
 """
     result = _run_direct(workspace, _request(code))
-    assert result["process"]["returncode"] == 0
-    assert result["cleanup"]["namespace_empty"] is True
-    assert result["cleanup"]["terminated_pids"] >= 1
+    process = _object(result["process"])
+    cleanup = _object(result["cleanup"])
+    assert process["returncode"] == 0
+    assert cleanup["namespace_empty"] is True
+    assert isinstance(cleanup["terminated_pids"], int)
+    assert cleanup["terminated_pids"] >= 1
     daemon_pid = int((workspace / "daemon.pid").read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(daemon_pid, 0)
@@ -1008,10 +1022,14 @@ pathlib.Path('started').write_text('yes')
 while True: time.sleep(1)
 """
     result = _run_direct(workspace, _request(code, timeout_ms=100))
-    assert result["process"]["timed_out"] is True
-    assert result["process"]["returncode"] < 0
-    assert result["cleanup"]["namespace_empty"] is True
-    assert result["cleanup"]["terminated_pids"] >= 1
+    process = _object(result["process"])
+    cleanup = _object(result["cleanup"])
+    assert process["timed_out"] is True
+    assert isinstance(process["returncode"], int)
+    assert process["returncode"] < 0
+    assert cleanup["namespace_empty"] is True
+    assert isinstance(cleanup["terminated_pids"], int)
+    assert cleanup["terminated_pids"] >= 1
 
 
 def test_output_limit_is_bounded_and_cleanup_precedes_export(tmp_path: Path) -> None:
@@ -1021,10 +1039,10 @@ def test_output_limit_is_bounded_and_cleanup_precedes_export(tmp_path: Path) -> 
         workspace,
         _request("import os; os.write(1,b'x'*1000000)", max_output_bytes=1024),
     )
-    process = result["process"]
+    process = _object(result["process"])
     assert process["output_limited"] is True
-    assert len(base64.b64decode(process["stdout_b64"])) == 1024
-    assert result["cleanup"]["namespace_empty"] is True
+    assert len(base64.b64decode(_string(process["stdout_b64"]))) == 1024
+    assert _object(result["cleanup"])["namespace_empty"] is True
 
 
 def test_sandbox_protocol_json_schema_accepts_request_and_result(tmp_path: Path) -> None:
@@ -1120,6 +1138,7 @@ def test_parse_result_raises_typed_remote_error() -> None:
         }
     ).encode()
     parsed = parse_response(response, request=request)
+    assert isinstance(parsed, SandboxErrorResponse)
     assert parsed.reason is StopReason.AUTHOR_SERVICE_NOT_EMPTY
     with pytest.raises(AgentLoopError) as captured:
         parse_result(response, request=request)

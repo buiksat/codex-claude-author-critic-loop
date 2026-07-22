@@ -14,6 +14,7 @@ from agent_loop.codex_client import (
     AUTHOR_CWD,
     AUTHOR_PERMISSION_PROFILE,
     AUTHOR_WORKSPACE,
+    SANDBOX_CODEX_HOME,
     CodexClient,
     CodexInvocation,
     SanitizedCodexConfig,
@@ -33,7 +34,6 @@ from agent_loop.codex_client import (
 from agent_loop.credentials import CodexCredentialTransaction, codex_credential_root
 from agent_loop.errors import AgentLoopError, ExitCode, StopReason
 from agent_loop.service import BoundedProcessResult, run_bounded_process
-
 
 AUTH = b'{"access_token":"fake-only-secret"}'
 ROLLOUT_THREAD_ID = "019f825d-5ede-7793-831d-884ce62c2caa"
@@ -122,9 +122,7 @@ def codex_rollout(turn_ids: tuple[str, ...]) -> bytes:
                     "payload": {
                         "type": "message",
                         "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "sanitized output"}
-                        ],
+                        "content": [{"type": "output_text", "text": "sanitized output"}],
                     },
                 },
                 {
@@ -142,9 +140,10 @@ def codex_rollout(turn_ids: tuple[str, ...]) -> bytes:
             )
         )
         cursor = run_end
-    return b"\n".join(
-        json.dumps(event, separators=(",", ":")).encode("utf-8") for event in events
-    ) + b"\n"
+    return (
+        b"\n".join(json.dumps(event, separators=(",", ":")).encode("utf-8") for event in events)
+        + b"\n"
+    )
 
 
 def install_rollout(codex_home: Path, data: bytes) -> Path:
@@ -154,10 +153,7 @@ def install_rollout(codex_home: Path, data: bytes) -> Path:
         if directory == codex_home.parent:
             break
         directory.chmod(0o700)
-    rollout = day / (
-        "rollout-2026-07-21T01-49-45-"
-        f"{ROLLOUT_THREAD_ID}.jsonl"
-    )
+    rollout = day / (f"rollout-2026-07-21T01-49-45-{ROLLOUT_THREAD_ID}.jsonl")
     rollout.write_bytes(data)
     rollout.chmod(0o600)
     return rollout
@@ -166,7 +162,7 @@ def install_rollout(codex_home: Path, data: bytes) -> Path:
 def valid_auth(data: bytes) -> bool:
     try:
         value = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except UnicodeDecodeError, json.JSONDecodeError:
         return False
     return isinstance(value, dict) and isinstance(value.get("access_token"), str)
 
@@ -228,7 +224,33 @@ def test_031_generated_config_is_sanitized_and_mandatory_profile_is_exact() -> N
     assert parsed["approval_policy"] == "never"
     assert parsed["web_search"] == "disabled"
     assert parsed["cli_auth_credentials_store"] == "file"
-    assert parsed["features"] == {"hooks": False}
+    assert parsed["include_apps_instructions"] is False
+    assert parsed["include_collaboration_mode_instructions"] is False
+    assert parsed["features"] == {
+        "apps": False,
+        "goals": False,
+        "hooks": False,
+        "memories": False,
+        "multi_agent": False,
+        "personality": False,
+        "remote_plugin": False,
+        "shell_snapshot": False,
+        "skill_mcp_dependency_install": False,
+        "tool_call_mcp_elicitation": False,
+    }
+    assert parsed["skills"]["config"] == [
+        {
+            "path": f"{SANDBOX_CODEX_HOME}/skills/.system/{name}/SKILL.md",
+            "enabled": False,
+        }
+        for name in (
+            "imagegen",
+            "openai-docs",
+            "plugin-creator",
+            "skill-creator",
+            "skill-installer",
+        )
+    ]
     assert parsed["projects"][AUTHOR_WORKSPACE]["trust_level"] == "untrusted"
     assert parsed["shell_environment_policy"]["inherit"] == "none"
     assert profile["extends"] == ":workspace"
@@ -239,11 +261,21 @@ def test_031_generated_config_is_sanitized_and_mandatory_profile_is_exact() -> N
     assert profile["filesystem"]["/control"] == "deny"
     assert profile["filesystem"]["/runtime/artifacts"] == "deny"
     workspace_denies = profile["filesystem"][":workspace_roots"]
-    for path in (".git", ".codex", "AGENTS.md", "**/AGENTS.override.md", "secrets/**"):
+    for path in (
+        ".git/**",
+        ".codex/**",
+        "AGENTS.md",
+        "**/AGENTS.override.md",
+        "secrets/**",
+    ):
         assert workspace_denies[path] == "deny"
-    assert b"MCP" not in encoded
-    assert b"plugin" not in encoded
-    assert b"skills" not in encoded
+    # These exact names are reserved mount targets in the pinned :workspace
+    # profile.  Adding a second exact deny makes Bubblewrap collide with its
+    # own directory mounts; descendant denies and the built-in profile retain
+    # the protection.
+    assert ".git" not in workspace_denies
+    assert ".codex" not in workspace_denies
+    assert b"mcp_servers" not in encoded
 
 
 def test_007_explicit_instruction_opt_in_relaxes_only_profile_prevention_layer() -> None:
@@ -252,14 +284,36 @@ def test_007_explicit_instruction_opt_in_relaxes_only_profile_prevention_layer()
         workspace_opt_ins=(".codex/task/settings.toml",),
     )
     parsed = tomllib.loads(config.render().decode("ascii"))
-    denies = parsed["permissions"][AUTHOR_PERMISSION_PROFILE]["filesystem"][
-        ":workspace_roots"
-    ]
+    denies = parsed["permissions"][AUTHOR_PERMISSION_PROFILE]["filesystem"][":workspace_roots"]
     assert ".codex" not in denies
     assert ".codex/**" not in denies
     assert denies["scripts/ci/**"] == "deny"
-    assert denies[".git"] == "deny"
+    assert ".git" not in denies
+    assert denies[".git/**"] == "deny"
     assert denies["**/.git/**"] == "deny"
+
+
+def test_reserved_workspace_mount_targets_cannot_be_reintroduced_by_project_policy() -> None:
+    parsed = tomllib.loads(
+        SanitizedCodexConfig(
+            additional_workspace_denies=(
+                ".git",
+                ".git/**",
+                ".codex",
+                ".codex/**",
+                "scripts/ci/**",
+            )
+        )
+        .render()
+        .decode("ascii")
+    )
+    denies = parsed["permissions"][AUTHOR_PERMISSION_PROFILE]["filesystem"][":workspace_roots"]
+
+    assert ".git" not in denies
+    assert ".codex" not in denies
+    assert denies[".git/**"] == "deny"
+    assert denies[".codex/**"] == "deny"
+    assert denies["scripts/ci/**"] == "deny"
 
 
 def test_031_config_is_installed_mode_0600_in_locked_transaction_home(
@@ -273,14 +327,23 @@ def test_031_config_is_installed_mode_0600_in_locked_transaction_home(
 
         assert config_path.parent == transaction.codex_home
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
-        assert config_path.read_bytes() == SanitizedCodexConfig(
-            model="gpt-explicit", effort="medium"
-        ).render()
+        assert (
+            config_path.read_bytes()
+            == SanitizedCodexConfig(model="gpt-explicit", effort="medium").render()
+        )
         assert {path.name for path in transaction.codex_home.iterdir()} == {
+            ".tmp",
             "auth.json",
             "config.toml",
+            "plugins",
             "sessions",
+            "skills",
+            "tmp",
         }
+        for name in (".tmp", "plugins", "skills", "tmp"):
+            mountpoint = transaction.codex_home / name
+            assert mountpoint.is_dir()
+            assert stat.S_IMODE(mountpoint.stat().st_mode) == 0o700
 
 
 def test_031_unreviewed_ambient_codex_home_state_is_rejected(tmp_path: Path) -> None:
@@ -453,9 +516,9 @@ def test_pinned_jsonl_contract_has_no_model_or_effort_metadata() -> None:
             "usage": {"input_tokens": 9, "output_tokens": 4},
         },
     )
-    payload = b"\n".join(
-        json.dumps(event, separators=(",", ":")).encode() for event in events
-    ) + b"\n"
+    payload = (
+        b"\n".join(json.dumps(event, separators=(",", ":")).encode() for event in events) + b"\n"
+    )
 
     result = parse_codex_jsonl(payload, expected_thread_id=ROLLOUT_THREAD_ID)
 
@@ -472,10 +535,7 @@ def test_pinned_jsonl_model_reroute_signal_fails_closed() -> None:
             "item": {
                 "id": "item_0",
                 "type": "error",
-                "message": (
-                    "model rerouted: gpt-5.4 -> gpt-5.2 "
-                    "(HighRiskCyberActivity)"
-                ),
+                "message": ("model rerouted: gpt-5.4 -> gpt-5.2 (HighRiskCyberActivity)"),
             },
         },
         {
@@ -487,12 +547,65 @@ def test_pinned_jsonl_model_reroute_signal_fails_closed() -> None:
             "usage": {"input_tokens": 9, "output_tokens": 4},
         },
     )
-    payload = b"\n".join(
-        json.dumps(event, separators=(",", ":")).encode() for event in events
-    ) + b"\n"
+    payload = (
+        b"\n".join(json.dumps(event, separators=(",", ":")).encode() for event in events) + b"\n"
+    )
 
     with pytest.raises(AgentLoopError, match="rerouted the requested model"):
         parse_codex_jsonl(payload, expected_thread_id=ROLLOUT_THREAD_ID)
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    (
+        "bwrap: No permissions to create a new namespace, likely because the kernel "
+        "does not allow non-privileged user namespaces.",
+        "failed to create synthetic bubblewrap mount registry /runtime/tmp/example: "
+        "Permission denied",
+        "bwrap: Can't create file at /workspace/.git: Is a directory",
+        "bwrap: Can't create file at /workspace/.codex: Is a directory",
+        "permission profiles requiring direct runtime enforcement are incompatible with "
+        "--use-legacy-landlock",
+    ),
+)
+def test_command_sandbox_setup_failure_dominates_completion_prose(diagnostic: str) -> None:
+    events = (
+        {"type": "thread.started", "thread_id": ROLLOUT_THREAD_ID},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_0",
+                "type": "command_execution",
+                "command": "/usr/bin/python3 /workspace/capability_probe.py first",
+                "aggregated_output": diagnostic,
+                "exit_code": 1,
+                "status": "failed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "agent_message",
+                "text": "LIVE_FIRST_PROBE_COMPLETE",
+            },
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 9, "output_tokens": 4},
+        },
+    )
+    payload = (
+        b"\n".join(json.dumps(event, separators=(",", ":")).encode() for event in events) + b"\n"
+    )
+
+    with pytest.raises(AgentLoopError) as caught:
+        parse_codex_jsonl(payload, expected_thread_id=ROLLOUT_THREAD_ID)
+
+    assert caught.value.reason is StopReason.SANDBOX_SETUP_FAILURE
+    assert caught.value.detail == "Codex command sandbox could not initialize"
+    assert diagnostic not in caught.value.detail
 
 
 def test_rollout_selection_tracks_first_resume_and_same_turn_compaction() -> None:
@@ -635,6 +748,36 @@ def test_rollout_selection_rejects_transient_event_types(nested_type: str) -> No
 
 
 @pytest.mark.parametrize(
+    "marker",
+    (
+        "<apps_instructions>",
+        "<plugins_instructions>",
+        "<skills_instructions>",
+        "request_plugin_install",
+        "tool_search",
+    ),
+)
+def test_073_rollout_rejects_ambient_control_context(marker: str) -> None:
+    lines = codex_rollout((ROLLOUT_TURN_IDS[0],)).splitlines()
+    injected = json.dumps(
+        {
+            "timestamp": "2026-07-21T01:49:45.001Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": marker}],
+            },
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    data = b"\n".join((lines[0], injected, *lines[1:])) + b"\n"
+
+    with pytest.raises(AgentLoopError, match="forbidden skill, plugin, or app"):
+        parse_codex_rollout_selection(data, expected_thread_id=ROLLOUT_THREAD_ID)
+
+
+@pytest.mark.parametrize(
     ("outer_type", "payload"),
     (
         ("future_rollout_item", {}),
@@ -673,8 +816,7 @@ def test_rollout_selection_requires_exact_real_turn_lifecycle(scenario: str) -> 
     started_index = next(
         index
         for index, event in enumerate(events)
-        if event["type"] == "event_msg"
-        and event["payload"]["type"] == "task_started"
+        if event["type"] == "event_msg" and event["payload"]["type"] == "task_started"
     )
     context_index = next(
         index for index, event in enumerate(events) if event["type"] == "turn_context"
@@ -682,8 +824,7 @@ def test_rollout_selection_requires_exact_real_turn_lifecycle(scenario: str) -> 
     completed_index = next(
         index
         for index, event in enumerate(events)
-        if event["type"] == "event_msg"
-        and event["payload"]["type"] == "task_complete"
+        if event["type"] == "event_msg" and event["payload"]["type"] == "task_complete"
     )
     if scenario == "missing-start":
         del events[started_index]
@@ -695,9 +836,7 @@ def test_rollout_selection_requires_exact_real_turn_lifecycle(scenario: str) -> 
         events[completed_index]["payload"]["turn_id"] = ROLLOUT_TURN_IDS[1]
     else:
         del events[started_index]["payload"]["model_context_window"]
-    data = b"\n".join(
-        json.dumps(event, separators=(",", ":")).encode() for event in events
-    ) + b"\n"
+    data = b"\n".join(json.dumps(event, separators=(",", ":")).encode() for event in events) + b"\n"
 
     with pytest.raises(AgentLoopError):
         parse_codex_rollout_selection(data, expected_thread_id=ROLLOUT_THREAD_ID)
@@ -760,9 +899,7 @@ def test_confined_rollout_reader_selects_exact_private_thread(tmp_path: Path) ->
 def test_confined_rollout_reader_rejects_nonprivate_file(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(mode=0o700)
-    rollout = install_rollout(
-        codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],))
-    )
+    rollout = install_rollout(codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],)))
     rollout.chmod(0o640)
 
     with pytest.raises(AgentLoopError, match="unsafe entry"):
@@ -777,9 +914,7 @@ def test_confined_rollout_reader_rejects_hardlink_and_symlink_boundaries(
 ) -> None:
     codex_home = tmp_path / "hardlink-home"
     codex_home.mkdir(mode=0o700)
-    rollout = install_rollout(
-        codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],))
-    )
+    rollout = install_rollout(codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],)))
     os.link(rollout, tmp_path / "second-rollout-link")
     with pytest.raises(AgentLoopError, match="unsafe entry"):
         read_codex_rollout_selection(
@@ -805,19 +940,19 @@ def test_confined_rollout_reader_rejects_xattrs_and_ignores_compressed_decoy(
 ) -> None:
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(mode=0o700)
-    rollout = install_rollout(
-        codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],))
-    )
+    rollout = install_rollout(codex_home, codex_rollout((ROLLOUT_TURN_IDS[0],)))
     compressed = rollout.with_name(
-        "rollout-2026-07-21T01-49-44-"
-        "019f825d-0000-7000-8000-000000000001.jsonl.zst"
+        "rollout-2026-07-21T01-49-44-019f825d-0000-7000-8000-000000000001.jsonl.zst"
     )
     compressed.write_bytes(b"opaque compressed decoy")
     compressed.chmod(0o600)
-    assert read_codex_rollout_selection(
-        codex_home,
-        expected_thread_id=ROLLOUT_THREAD_ID,
-    ).model == "gpt-5.4"
+    assert (
+        read_codex_rollout_selection(
+            codex_home,
+            expected_thread_id=ROLLOUT_THREAD_ID,
+        ).model
+        == "gpt-5.4"
+    )
 
     try:
         os.setxattr(rollout, b"user.agent-loop-test", b"forbidden")
@@ -1004,18 +1139,19 @@ def test_unflagged_oversized_nonzero_result_is_still_an_output_limit() -> None:
 
 def test_nonzero_process_reports_only_strict_structural_failure_facts() -> None:
     secret = "credential-and-model-content-must-not-cross"
-    stdout = b"\n".join(
-        (
-            b'{"type":"thread.started","thread_id":"thread-safe"}',
-            json.dumps(
-                {"type": "error", "message": secret}, separators=(",", ":")
-            ).encode(),
-            json.dumps(
-                {"type": "turn.failed", "error": {"message": secret}},
-                separators=(",", ":"),
-            ).encode(),
+    stdout = (
+        b"\n".join(
+            (
+                b'{"type":"thread.started","thread_id":"thread-safe"}',
+                json.dumps({"type": "error", "message": secret}, separators=(",", ":")).encode(),
+                json.dumps(
+                    {"type": "turn.failed", "error": {"message": secret}},
+                    separators=(",", ":"),
+                ).encode(),
+            )
         )
-    ) + b"\n"
+        + b"\n"
+    )
     result = BoundedProcessResult(
         1,
         stdout,
@@ -1035,6 +1171,25 @@ def test_nonzero_process_reports_only_strict_structural_failure_facts() -> None:
         "thread_started=true; terminal_event=turn.failed; stderr_present=true)"
     )
     assert secret not in caught.value.detail
+
+
+def test_revoked_codex_session_has_fixed_one_step_reauthentication_guidance() -> None:
+    stdout = (
+        b'{"type":"thread.started","thread_id":"thread-safe"}\n'
+        b'{"type":"turn.failed","error":{"message":"Your access token could not be '
+        b'refreshed because your refresh token was revoked. Please log out and sign in again."}}\n'
+    )
+    result = BoundedProcessResult(1, stdout, b"private stderr", 1.0, 2.0, False, False)
+
+    with pytest.raises(AgentLoopError) as caught:
+        classify_codex_process_result(result)
+
+    assert caught.value.reason is StopReason.CREDENTIAL_REFRESH_FAILURE
+    assert caught.value.detail == (
+        "Codex vendor session ended; run `codex login` once, then rerun. "
+        "No `agent-loop auth` command is required."
+    )
+    assert "access token" not in caught.value.detail
 
 
 @pytest.mark.parametrize(
@@ -1091,12 +1246,15 @@ def test_nonzero_diagnostic_fails_closed_for_malformed_or_duplicate_jsonl(
 def test_nonzero_diagnostic_classifies_only_exact_terminal_event_shape(
     last_event: dict[str, object], expected_terminal: str
 ) -> None:
-    stdout = b"\n".join(
-        (
-            b'{"type":"thread.started","thread_id":"thread-safe"}',
-            json.dumps(last_event, separators=(",", ":")).encode(),
+    stdout = (
+        b"\n".join(
+            (
+                b'{"type":"thread.started","thread_id":"thread-safe"}',
+                json.dumps(last_event, separators=(",", ":")).encode(),
+            )
         )
-    ) + b"\n"
+        + b"\n"
+    )
     result = BoundedProcessResult(1, stdout, b"", 1.0, 2.0, False, False)
 
     with pytest.raises(AgentLoopError) as caught:

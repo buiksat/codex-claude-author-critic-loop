@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 
 from .constants import VALIDATION_SCHEMA_VERSION
-from .validation import ClassifiedCheck, CheckOutcome
+from .validation import CheckOutcome, ClassifiedCheck
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,8 +125,7 @@ def declassify_validation(
             current_outcome=check.current_outcome.value,
             transition=check.transition.value,
             regression=check.regression,
-            evidence_complete=check.current_outcome
-            in {CheckOutcome.PASSED, CheckOutcome.FAILED},
+            evidence_complete=check.current_outcome in {CheckOutcome.PASSED, CheckOutcome.FAILED},
         )
         for check in checks
     )

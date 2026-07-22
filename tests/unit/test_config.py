@@ -11,6 +11,13 @@ def test_defaults_are_conservative() -> None:
     assert config.max_rounds == 3
     assert set(DEFAULT_PROTECTED_PATTERNS) <= set(config.protected_paths)
     assert config.checks == ()
+    assert config.codex_credential_id == "default"
+    assert config.claude_credential_id == "default"
+    assert (config.author_model, config.author_effort) == ("gpt-5.4", "high")
+    assert (config.critic_model, config.critic_effort) == (
+        "claude-opus-4-6",
+        "medium",
+    )
 
 
 def test_project_config_reader_rejects_an_intermediate_symlink(tmp_path: Path) -> None:
@@ -63,9 +70,7 @@ def test_configuration_path_collections_and_patterns_are_strictly_bounded() -> N
     with pytest.raises(ValueError, match="path-pattern bound"):
         project_config_from_mapping({"discard_only_paths": ["x" * 4_097]})
     with pytest.raises(ValueError, match="path-pattern bound"):
-        project_config_from_mapping(
-            {"review_context_paths": ["/".join("x" for _ in range(129))]}
-        )
+        project_config_from_mapping({"review_context_paths": ["/".join("x" for _ in range(129))]})
 
 
 def test_limits_may_only_tighten_defaults() -> None:

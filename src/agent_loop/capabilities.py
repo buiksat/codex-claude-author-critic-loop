@@ -6,7 +6,7 @@ one exact host, CLI installation, credential identity, and model selection.
 Production code must reconstruct the expected binding from its current
 preflight and run configuration and call :func:`verify_live_capability_receipt`.
 
-Only successful opt-in acceptance tests should call
+Only the installed live qualification runner (or its focused receipt tests) should call
 :func:`write_successful_live_capability_receipt`.  Receipt files contain no
 credential bytes, but their account identifiers and environment facts are
 sensitive operational metadata, so both the containing directory and file are
@@ -35,9 +35,9 @@ if TYPE_CHECKING:
     from .preflight import EnvironmentReport, TrustedExecutable
 
 
-CAPABILITY_RECEIPT_SCHEMA_VERSION = 2
+CAPABILITY_RECEIPT_SCHEMA_VERSION = 3
 CAPABILITY_RECEIPT_TYPE = "agent-loop.live-capabilities"
-CAPABILITY_RECEIPT_RELATIVE_PATH = Path("agent-loop/capabilities/live-v2.json")
+CAPABILITY_RECEIPT_RELATIVE_PATH = Path("agent-loop/capabilities/live-v3.json")
 MAX_CAPABILITY_RECEIPT_BYTES = 64 * 1024
 MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS = 7 * 24 * 60 * 60
 
@@ -58,9 +58,16 @@ class AcceptanceGate(StrEnum):
     PROCESS_INTROSPECTION = "30-process-introspection"
     CUSTOM_PROFILE = "33-custom-profile"
     MANAGED_CLAUDE_BOUNDARY = "49-managed-claude-boundary"
+    RETRY_BUDGET = "51-retry-budget"
+    MODEL_RECORD = "64-model-record"
     GITLESS_FIRST_AND_RESUME = "65-gitless-first-turn-and-resume"
     PROJECT_INSTRUCTION_ISOLATION = "66-project-instruction-isolation"
     SERVICE_LIFECYCLE = "71-transient-service-lifecycle"
+    CLAUDE_ACCOUNT_AUTH_ISOLATION = "72-claude-account-auth-isolation"
+    CODEX_CONTROL_CONTEXT_ISOLATION = "73-codex-control-context-isolation"
+    PINNED_SELECTION_EVIDENCE = "74-pinned-selection-evidence-adapters"
+    FIXED_AUTHOR_MANAGER = "76-fixed-author-manager-and-inner-sandbox"
+    CLAUDE_WIRE_LOCAL_CONTRACT = "78-claude-wire-local-contract"
 
 
 REQUIRED_ACCEPTANCE_GATES = tuple(AcceptanceGate)
@@ -128,8 +135,7 @@ def _positive_bounded_seconds(value: object, *, field: str) -> int:
         or value > MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS
     ):
         raise ValueError(
-            f"{field} must be between 1 and "
-            f"{MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS} seconds"
+            f"{field} must be between 1 and {MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS} seconds"
         )
     return value
 
@@ -145,6 +151,111 @@ def _closed_object(value: object, keys: set[str], *, field: str) -> Mapping[str,
     if unknown:
         _invalid(f"{field} contains unknown properties")
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorServiceCapabilityBinding:
+    """Exact root-installed fixed author manager proven by preflight."""
+
+    protocol: int
+    build_id: str
+    authorized_uid: int
+    socket_path: str
+    socket_owner_uid: int
+    socket_mode: int
+    socket_unit_sha256: str
+    broker_unit_sha256: str
+    socket_dropin_sha256: str
+    config_sha256: str
+    install_record_sha256: str
+    runtime_closure_sha256: str
+    wheel_sha256: str
+    codex_closure_sha256: str
+    effective_units_sha256: str
+    package_version: str
+    broker_probe: bool
+
+    def __post_init__(self) -> None:
+        if self.protocol != 1:
+            _invalid("host.author_service.protocol is unsupported")
+        _matching_text(
+            self.build_id,
+            _IDENTIFIER,
+            field="host.author_service.build_id",
+        )
+        if (
+            not isinstance(self.authorized_uid, int)
+            or isinstance(self.authorized_uid, bool)
+            or self.authorized_uid <= 0
+            or self.socket_owner_uid != self.authorized_uid
+        ):
+            _invalid("host.author_service authorized/socket UID is invalid")
+        if self.socket_mode != 0o600:
+            _invalid("host.author_service.socket_mode must be 0600")
+        if self.socket_path != "/run/agent-loop/author.sock":
+            _invalid("host.author_service.socket_path is not the fixed path")
+        for name in (
+            "socket_unit_sha256",
+            "broker_unit_sha256",
+            "socket_dropin_sha256",
+            "config_sha256",
+            "install_record_sha256",
+            "runtime_closure_sha256",
+            "wheel_sha256",
+            "codex_closure_sha256",
+            "effective_units_sha256",
+        ):
+            _sha256(getattr(self, name), field=f"host.author_service.{name}")
+        _matching_text(
+            self.package_version,
+            _IDENTIFIER,
+            field="host.author_service.package_version",
+        )
+        _true(self.broker_probe, field="host.author_service.broker_probe")
+
+    @classmethod
+    def from_environment_report(cls, report: EnvironmentReport) -> Self:
+        selected = report.author_service
+        return cls(
+            protocol=selected.protocol,
+            build_id=selected.build_id,
+            authorized_uid=selected.authorized_uid,
+            socket_path=selected.socket_path,
+            socket_owner_uid=selected.socket_owner_uid,
+            socket_mode=selected.socket_mode,
+            socket_unit_sha256=selected.socket_unit_sha256,
+            broker_unit_sha256=selected.broker_unit_sha256,
+            socket_dropin_sha256=selected.socket_dropin_sha256,
+            config_sha256=selected.config_sha256,
+            install_record_sha256=selected.install_record_sha256,
+            runtime_closure_sha256=selected.runtime_closure_sha256,
+            wheel_sha256=selected.wheel_sha256,
+            codex_closure_sha256=selected.codex_closure_sha256,
+            effective_units_sha256=selected.effective_units_sha256,
+            package_version=selected.package_version,
+            broker_probe=selected.broker_probe,
+        )
+
+    def to_json_obj(self) -> dict[str, object]:
+        return {
+            "protocol": self.protocol,
+            "build_id": self.build_id,
+            "authorized_uid": self.authorized_uid,
+            "socket_path": self.socket_path,
+            "socket_owner_uid": self.socket_owner_uid,
+            "socket_mode": self.socket_mode,
+            "socket_unit_sha256": self.socket_unit_sha256,
+            "broker_unit_sha256": self.broker_unit_sha256,
+            "socket_dropin_sha256": self.socket_dropin_sha256,
+            "config_sha256": self.config_sha256,
+            "install_record_sha256": self.install_record_sha256,
+            "runtime_closure_sha256": self.runtime_closure_sha256,
+            "wheel_sha256": self.wheel_sha256,
+            "codex_closure_sha256": self.codex_closure_sha256,
+            "effective_units_sha256": self.effective_units_sha256,
+            "package_version": self.package_version,
+            "broker_probe": self.broker_probe,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +275,7 @@ class HostCapabilityBinding:
     bubblewrap_executable_sha256: str
     python_executable_sha256: str
     runtime_closure_sha256: str
+    author_service: AuthorServiceCapabilityBinding
     openat2: bool
     namespace_probe: bool
     transient_service_probe: bool
@@ -194,6 +306,8 @@ class HostCapabilityBinding:
             self.runtime_closure_sha256,
             field="host.runtime_closure_sha256",
         )
+        if not isinstance(self.author_service, AuthorServiceCapabilityBinding):
+            raise TypeError("host.author_service must be an AuthorServiceCapabilityBinding")
         for name in ("openat2", "namespace_probe", "transient_service_probe"):
             _true(getattr(self, name), field=f"host.{name}")
 
@@ -220,6 +334,7 @@ class HostCapabilityBinding:
             bubblewrap_executable_sha256=report.bubblewrap.sha256,
             python_executable_sha256=report.python_executable.sha256,
             runtime_closure_sha256=runtime_closure_sha256,
+            author_service=AuthorServiceCapabilityBinding.from_environment_report(report),
             openat2=report.openat2,
             namespace_probe=report.namespace_probe,
             transient_service_probe=report.transient_service_probe,
@@ -240,6 +355,7 @@ class HostCapabilityBinding:
             "bubblewrap_executable_sha256": self.bubblewrap_executable_sha256,
             "python_executable_sha256": self.python_executable_sha256,
             "runtime_closure_sha256": self.runtime_closure_sha256,
+            "author_service": self.author_service.to_json_obj(),
             "openat2": self.openat2,
             "namespace_probe": self.namespace_probe,
             "transient_service_probe": self.transient_service_probe,
@@ -368,8 +484,7 @@ class LiveCapabilityBinding:
             ManagedClaudeBoundaryCapabilityBinding,
         ):
             raise TypeError(
-                "managed_claude_boundary must be a "
-                "ManagedClaudeBoundaryCapabilityBinding"
+                "managed_claude_boundary must be a ManagedClaudeBoundaryCapabilityBinding"
             )
 
     @classmethod
@@ -468,13 +583,16 @@ class LiveCapabilityReceipt:
         return result
 
     def to_bytes(self) -> bytes:
-        return json.dumps(
-            self.to_json_obj(),
-            ensure_ascii=True,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("ascii") + b"\n"
+        return (
+            json.dumps(
+                self.to_json_obj(),
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            + b"\n"
+        )
 
 
 _HOST_KEYS = {
@@ -491,9 +609,29 @@ _HOST_KEYS = {
     "bubblewrap_executable_sha256",
     "python_executable_sha256",
     "runtime_closure_sha256",
+    "author_service",
     "openat2",
     "namespace_probe",
     "transient_service_probe",
+}
+_AUTHOR_SERVICE_KEYS = {
+    "protocol",
+    "build_id",
+    "authorized_uid",
+    "socket_path",
+    "socket_owner_uid",
+    "socket_mode",
+    "socket_unit_sha256",
+    "broker_unit_sha256",
+    "socket_dropin_sha256",
+    "config_sha256",
+    "install_record_sha256",
+    "runtime_closure_sha256",
+    "wheel_sha256",
+    "codex_closure_sha256",
+    "effective_units_sha256",
+    "package_version",
+    "broker_probe",
 }
 _TOOL_REQUIRED_KEYS = {
     "version",
@@ -607,6 +745,60 @@ def _parse_managed_claude_boundary(
     )
 
 
+def _parse_author_service(value: object) -> AuthorServiceCapabilityBinding:
+    field = "host.author_service"
+    service = _closed_object(value, _AUTHOR_SERVICE_KEYS, field=field)
+    integer_values: dict[str, int] = {}
+    for name in ("protocol", "authorized_uid", "socket_owner_uid", "socket_mode"):
+        selected = service[name]
+        if not isinstance(selected, int) or isinstance(selected, bool):
+            _invalid(f"{field}.{name} must be an integer")
+        integer_values[name] = selected
+    return AuthorServiceCapabilityBinding(
+        protocol=integer_values["protocol"],
+        build_id=_matching_text(
+            service["build_id"],
+            _IDENTIFIER,
+            field=f"{field}.build_id",
+        ),
+        authorized_uid=integer_values["authorized_uid"],
+        socket_path=_absolute_path(service["socket_path"], field=f"{field}.socket_path"),
+        socket_owner_uid=integer_values["socket_owner_uid"],
+        socket_mode=integer_values["socket_mode"],
+        socket_unit_sha256=_sha256(
+            service["socket_unit_sha256"], field=f"{field}.socket_unit_sha256"
+        ),
+        broker_unit_sha256=_sha256(
+            service["broker_unit_sha256"], field=f"{field}.broker_unit_sha256"
+        ),
+        socket_dropin_sha256=_sha256(
+            service["socket_dropin_sha256"], field=f"{field}.socket_dropin_sha256"
+        ),
+        config_sha256=_sha256(service["config_sha256"], field=f"{field}.config_sha256"),
+        install_record_sha256=_sha256(
+            service["install_record_sha256"], field=f"{field}.install_record_sha256"
+        ),
+        runtime_closure_sha256=_sha256(
+            service["runtime_closure_sha256"], field=f"{field}.runtime_closure_sha256"
+        ),
+        wheel_sha256=_sha256(service["wheel_sha256"], field=f"{field}.wheel_sha256"),
+        codex_closure_sha256=_sha256(
+            service["codex_closure_sha256"],
+            field=f"{field}.codex_closure_sha256",
+        ),
+        effective_units_sha256=_sha256(
+            service["effective_units_sha256"],
+            field=f"{field}.effective_units_sha256",
+        ),
+        package_version=_matching_text(
+            service["package_version"],
+            _IDENTIFIER,
+            field=f"{field}.package_version",
+        ),
+        broker_probe=_true(service["broker_probe"], field=f"{field}.broker_probe"),
+    )
+
+
 def _parse_receipt(data: bytes) -> LiveCapabilityReceipt:
     if not isinstance(data, bytes):
         raise TypeError("capability receipt data must be bytes")
@@ -623,7 +815,7 @@ def _parse_receipt(data: bytes) -> LiveCapabilityReceipt:
         )
     except CapabilityReceiptError:
         raise
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except UnicodeDecodeError, ValueError, RecursionError:
         _invalid("capability receipt is not valid UTF-8 JSON")
 
     top = _closed_object(value, _TOP_LEVEL_KEYS, field="receipt")
@@ -672,6 +864,7 @@ def _parse_receipt(data: bytes) -> LiveCapabilityReceipt:
                     host["runtime_closure_sha256"],
                     field="host.runtime_closure_sha256",
                 ),
+                author_service=_parse_author_service(host["author_service"]),
                 openat2=_true(host["openat2"], field="host.openat2"),
                 namespace_probe=_true(
                     host["namespace_probe"],
@@ -684,9 +877,7 @@ def _parse_receipt(data: bytes) -> LiveCapabilityReceipt:
             ),
             codex=_parse_tool(tools["codex"], field="tools.codex"),
             claude=_parse_tool(tools["claude"], field="tools.claude"),
-            managed_claude_boundary=_parse_managed_claude_boundary(
-                top["managed_claude_boundary"]
-            ),
+            managed_claude_boundary=_parse_managed_claude_boundary(top["managed_claude_boundary"]),
         ),
         issued_at_unix=_timestamp(top["issued_at_unix"], field="issued_at_unix"),
         expires_at_unix=_timestamp(top["expires_at_unix"], field="expires_at_unix"),
@@ -753,7 +944,7 @@ def _private_file_info(filesystem: ConfinedFilesystem, name: bytes) -> os.stat_r
 def _read_private_receipt(path: Path) -> bytes:
     try:
         filesystem = ConfinedFilesystem.open(path.parent)
-    except (AgentLoopError, OSError, TypeError, ValueError):
+    except AgentLoopError, OSError, TypeError, ValueError:
         _invalid("capability receipt directory cannot be opened without symlinks")
     with filesystem:
         _require_private_directory(filesystem)
@@ -761,7 +952,7 @@ def _read_private_receipt(path: Path) -> bytes:
         _private_file_info(filesystem, name)
         try:
             return filesystem.read_bytes(name, max_bytes=MAX_CAPABILITY_RECEIPT_BYTES)
-        except (AgentLoopError, OSError, TypeError, ValueError):
+        except AgentLoopError, OSError, TypeError, ValueError:
             _invalid("capability receipt cannot be read as a stable private file")
 
 
@@ -804,7 +995,7 @@ def write_successful_live_capability_receipt(
     selected = _normalized_receipt_path(path)
     try:
         filesystem = ConfinedFilesystem.create_private(selected.parent)
-    except (AgentLoopError, OSError, TypeError, ValueError):
+    except AgentLoopError, OSError, TypeError, ValueError:
         _invalid("capability receipt directory cannot be created without symlinks")
     with filesystem:
         _require_private_directory(filesystem)
@@ -826,7 +1017,7 @@ def write_successful_live_capability_receipt(
                 _invalid("existing capability receipt is not a private regular file")
             try:
                 filesystem.read_bytes(name, max_bytes=MAX_CAPABILITY_RECEIPT_BYTES)
-            except (AgentLoopError, OSError, TypeError, ValueError):
+            except AgentLoopError, OSError, TypeError, ValueError:
                 _invalid("existing capability receipt metadata is unsafe")
         try:
             filesystem.atomic_write(
@@ -837,7 +1028,7 @@ def write_successful_live_capability_receipt(
             )
             _private_file_info(filesystem, name)
             persisted = filesystem.read_bytes(name, max_bytes=MAX_CAPABILITY_RECEIPT_BYTES)
-        except (AgentLoopError, OSError, TypeError, ValueError):
+        except AgentLoopError, OSError, TypeError, ValueError:
             _invalid("capability receipt could not be atomically persisted")
         if persisted != encoded:
             _invalid("persisted capability receipt failed byte verification")

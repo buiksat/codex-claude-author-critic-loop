@@ -17,7 +17,7 @@ from agent_loop.artifacts import ArtifactStore, ContentAddressedBlobStore
 from agent_loop.claude_managed_policy import ManagedClaudeBoundary
 from agent_loop.constants import Limits
 from agent_loop.credentials import CodexCredentialTransaction, codex_credential_root
-from agent_loop.declassify import declassify_validation
+from agent_loop.declassify import KnownSecret, declassify_validation
 from agent_loop.errors import AgentLoopError, StopReason, fail
 from agent_loop.manifests import SubjectManifest
 from agent_loop.models import ManifestEntry, PathPolicy, sha256_hex
@@ -26,11 +26,11 @@ from agent_loop.provenance import closure_sha256, open_verified_closure
 from agent_loop.runner import AuthorRequest, CriticRequest, LoopRunner, ValidationRequest
 from agent_loop.runtime_adapters import (
     FixedValidationCheck,
-    SandboxExecution,
-    SandboxExecutor,
     SandboxedClaudeCriticAdapter,
     SandboxedCodexAuthorAdapter,
     SandboxedValidationAdapter,
+    SandboxExecution,
+    SandboxExecutor,
 )
 from agent_loop.sandbox import SandboxMount, SandboxRole
 from agent_loop.sandbox_init import (
@@ -56,7 +56,6 @@ from agent_loop.validation import (
     verify_validation_mutation,
 )
 from agent_loop.workflow import parse_codex_file_auth
-
 
 _DIRECT_SUPERVISOR = r"""
 import sys
@@ -111,8 +110,7 @@ class DirectSupervisorService:
         completed = subprocess.run(
             (sys.executable, "-c", _DIRECT_SUPERVISOR, os.fspath(workspace)),
             input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=environment,
             close_fds=True,
             check=False,
@@ -220,12 +218,8 @@ def test_001_ignored_runtime_configuration_changes_validation_behavior(
             },
         )
 
-        absent = adapter.validate(
-            ValidationRequest(ignored_without_config, None, time_deadline())
-        )
-        present = adapter.validate(
-            ValidationRequest(ignored_with_config, None, time_deadline())
-        )
+        absent = adapter.validate(ValidationRequest(ignored_without_config, None, time_deadline()))
+        present = adapter.validate(ValidationRequest(ignored_with_config, None, time_deadline()))
 
         assert absent.summary.checks[0].exit_code == 1
         assert present.summary.checks[0].exit_code == 0
@@ -265,13 +259,13 @@ def test_009_executor_uses_bwrap_pid1_supervisor_and_delays_blob_persistence(
         assert execution.result.cleanup.namespace_empty is True
         assert service.roles == ["validation"]
         command = service.commands[0]
-        assert command[:4] == ("/usr/bin/python3", "-I", "-B", "-c")
+        assert command[:5] == ("/usr/bin/python3", "-I", "-B", "-S", "-c")
         launched = tuple(json.loads(command[-1])["argv"])
         assert launched[0] == "/usr/bin/bwrap"
         assert "--as-pid-1" in launched
         assert "--unshare-net" in launched
         assert "/opt/agent-loop-runtime" in launched
-        assert launched[-5:-1] == ("/usr/bin/python3", "-I", "-B", "-c")
+        assert launched[-6:-1] == ("/usr/bin/python3", "-I", "-B", "-S", "-c")
         assert "agent_loop.sandbox_init" in launched[-1]
         assert service.requests[0].manifest == SubjectManifest.empty()
 
@@ -309,8 +303,8 @@ def test_executor_rejects_missing_cgroup_proof_and_malformed_response(tmp_path: 
         malformed = SandboxExecutor(
             blobs,
             service=MalformedService(),
-            service_attempt_sink=lambda role, number, request, service, completed: (
-                attempts.append((role, number, request, service, completed))
+            service_attempt_sink=lambda role, number, request, service, completed: attempts.append(
+                (role, number, request, service, completed)
             ),
         )
         with pytest.raises(AgentLoopError) as invalid:
@@ -328,9 +322,7 @@ def test_executor_rejects_missing_cgroup_proof_and_malformed_response(tmp_path: 
         assert attempts[0][2].manifest == SubjectManifest.empty()
         assert attempts[0][3].process.stdout == b"{}\n"
 
-        limited_attempts: list[
-            tuple[SandboxRole, int, SandboxRequest, ServiceResult, float]
-        ] = []
+        limited_attempts: list[tuple[SandboxRole, int, SandboxRequest, ServiceResult, float]] = []
         limited = SandboxExecutor(
             blobs,
             service=OutputLimitedService(),
@@ -533,7 +525,7 @@ def test_validation_runs_fixed_checks_sequentially_in_one_fresh_tmpfs(
             ),
             FixedValidationCheck(
                 "two",
-                "test \"$(cat cache/one)\" = one; printf two > cache/two; printf second >&2",
+                'test "$(cat cache/one)" = one; printf two > cache/two; printf second >&2',
                 2,
             ),
         )
@@ -607,12 +599,10 @@ def test_validation_ordinary_failure_does_not_hide_later_shared_workspace_check(
             SandboxExecutor(blobs, service=DirectSupervisorService(service_root)),
             (
                 FixedValidationCheck("build", "printf built > build-output; false", 2),
-                FixedValidationCheck("test", "test \"$(cat build-output)\" = built", 2),
+                FixedValidationCheck("test", 'test "$(cat build-output)" = built', 2),
             ),
         )
-        turn = adapter.validate(
-            ValidationRequest(SubjectManifest.empty(), None, time_deadline())
-        )
+        turn = adapter.validate(ValidationRequest(SubjectManifest.empty(), None, time_deadline()))
         assert [check.exit_code for check in turn.summary.checks] == [1, 0]
         assert b"build-output" in {entry.path for entry in turn.result_manifest.entries}
     finally:
@@ -627,10 +617,10 @@ def test_validation_cleans_detached_descendants_before_the_next_check(tmp_path: 
         "/usr/bin/python3 -c $'import os,time,pathlib\\n"
         "pid=os.fork()\\n"
         "if pid:\\n"
-        " while not pathlib.Path(\"daemon.pid\").exists(): time.sleep(.005)\\n"
+        ' while not pathlib.Path("daemon.pid").exists(): time.sleep(.005)\\n'
         " os._exit(0)\\n"
         "os.setsid()\\n"
-        "pathlib.Path(\"daemon.pid\").write_text(str(os.getpid()))\\n"
+        'pathlib.Path("daemon.pid").write_text(str(os.getpid()))\\n'
         "time.sleep(30)'"
     )
     try:
@@ -640,14 +630,12 @@ def test_validation_cleans_detached_descendants_before_the_next_check(tmp_path: 
                 FixedValidationCheck("spawn", daemon, 2),
                 FixedValidationCheck(
                     "prove-clean",
-                    "test ! -e /proc/\"$(cat daemon.pid)\"; printf clean > cleanup-ok",
+                    'test ! -e /proc/"$(cat daemon.pid)"; printf clean > cleanup-ok',
                     2,
                 ),
             ),
         )
-        turn = adapter.validate(
-            ValidationRequest(SubjectManifest.empty(), None, time_deadline())
-        )
+        turn = adapter.validate(ValidationRequest(SubjectManifest.empty(), None, time_deadline()))
         assert turn.summary.all_pass is True
         assert b"cleanup-ok" in {entry.path for entry in turn.result_manifest.entries}
     finally:
@@ -666,9 +654,7 @@ def test_validation_final_manifest_is_the_last_shared_workspace_state(tmp_path: 
                 FixedValidationCheck("replace", "printf new > result; rm removed", 2),
             ),
         )
-        turn = adapter.validate(
-            ValidationRequest(SubjectManifest.empty(), None, time_deadline())
-        )
+        turn = adapter.validate(ValidationRequest(SubjectManifest.empty(), None, time_deadline()))
         assert len(turn.result_manifest.entries) == 1
         entry = turn.result_manifest.entries[0]
         assert entry.path == b"result"
@@ -692,9 +678,7 @@ def test_validation_aggregate_output_limit_stops_the_remaining_batch(tmp_path: P
             max_raw_log_bytes=512,
             output_max_bytes=400,
         )
-        turn = adapter.validate(
-            ValidationRequest(SubjectManifest.empty(), None, time_deadline())
-        )
+        turn = adapter.validate(ValidationRequest(SubjectManifest.empty(), None, time_deadline()))
         assert turn.summary.checks[-1].output_limited is True
         assert turn.summary.checks[-1].outcome is CheckOutcome.OUTPUT_LIMITED
         assert b'"check_id":"two"' in turn.raw_log
@@ -749,9 +733,7 @@ def test_validation_terminal_process_record_preserves_partial_evidence_and_stops
             (check, FixedValidationCheck("must-not-run", "printf ran > forbidden", 2)),
         )
 
-        turn = adapter.validate(
-            ValidationRequest(SubjectManifest.empty(), None, time_deadline())
-        )
+        turn = adapter.validate(ValidationRequest(SubjectManifest.empty(), None, time_deadline()))
 
         assert len(service.requests) == 1
         assert len(turn.summary.checks) == 1
@@ -827,11 +809,7 @@ def test_validation_unexecutable_shell_status_is_retained_as_infrastructure_evid
                 ),
             ),
         )
-        prior = (
-            None
-            if baseline is None
-            else ValidationSummary(1, subject.fingerprint, ())
-        )
+        prior = None if baseline is None else ValidationSummary(1, subject.fingerprint, ())
 
         turn = adapter.validate(ValidationRequest(subject, prior, time_deadline()))
         assert len(turn.summary.checks) == 1
@@ -951,16 +929,12 @@ def test_validation_supervisor_attempt_is_retained_before_batch_parse_failure() 
     adapter = SandboxedValidationAdapter(
         executor,  # type: ignore[arg-type]
         (FixedValidationCheck("check", "true", 2),),
-        attempt_sink=lambda role, attempt, execution: attempts.append(
-            (role, attempt, execution)
-        ),
+        attempt_sink=lambda role, attempt, execution: attempts.append((role, attempt, execution)),
         clock=lambda: 0.0,
     )
 
     with pytest.raises(AgentLoopError) as caught:
-        adapter.validate(
-            ValidationRequest(SubjectManifest.empty(), None, 1_000.0)
-        )
+        adapter.validate(ValidationRequest(SubjectManifest.empty(), None, 1_000.0))
 
     assert caught.value.reason is StopReason.SANDBOX_SETUP_FAILURE
     assert len(attempts) == 1
@@ -1108,9 +1082,7 @@ def _pinned_codex_jsonl(thread_id: str) -> bytes:
             "usage": {"input_tokens": 3, "output_tokens": 2},
         },
     )
-    return b"\n".join(
-        json.dumps(value, separators=(",", ":")).encode() for value in values
-    ) + b"\n"
+    return b"\n".join(json.dumps(value, separators=(",", ":")).encode() for value in values) + b"\n"
 
 
 def _runtime_rollout(turn_ids: tuple[str, ...]) -> bytes:
@@ -1179,9 +1151,7 @@ def _runtime_rollout(turn_ids: tuple[str, ...]) -> bytes:
                 },
             )
         )
-    return b"\n".join(
-        json.dumps(event, separators=(",", ":")).encode() for event in events
-    ) + b"\n"
+    return b"\n".join(json.dumps(event, separators=(",", ":")).encode() for event in events) + b"\n"
 
 
 def _write_runtime_rollout(codex_home: Path, turn_ids: tuple[str, ...]) -> Path:
@@ -1194,10 +1164,7 @@ def _write_runtime_rollout(codex_home: Path, turn_ids: tuple[str, ...]) -> Path:
     day.mkdir(mode=0o700, parents=True, exist_ok=True)
     for directory in (sessions, year, month, day):
         directory.chmod(0o700)
-    rollout = day / (
-        "rollout-2026-07-21T01-49-45-"
-        f"{_ROLLOUT_THREAD_ID}.jsonl"
-    )
+    rollout = day / (f"rollout-2026-07-21T01-49-45-{_ROLLOUT_THREAD_ID}.jsonl")
     rollout.write_bytes(_runtime_rollout(turn_ids))
     rollout.chmod(0o600)
     return rollout
@@ -1384,9 +1351,7 @@ def test_codex_adapter_attests_pinned_first_and_resume_selection_from_rollout(
         clock=lambda: 0.0,
     )
 
-    first = adapter.turn(
-        AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
-    )
+    first = adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
     rollout.write_bytes(_runtime_rollout(_ROLLOUT_TURN_IDS[:2]))
     rollout.chmod(0o600)
     resumed = adapter.turn(
@@ -1428,9 +1393,7 @@ def test_codex_adapter_resume_rejects_history_prepended_before_prior_turn(
         clock=lambda: 0.0,
     )
 
-    first = adapter.turn(
-        AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
-    )
+    first = adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
     rollout.write_bytes(
         _runtime_rollout(
             (
@@ -1487,9 +1450,7 @@ def test_codex_adapter_rejects_duplicate_first_before_executor_call(
     calls_after_first = len(executor.calls)
 
     with pytest.raises(AgentLoopError, match="inconsistent with a first turn"):
-        adapter.turn(
-            AuthorRequest(1, SubjectManifest.empty(), "duplicate", None, 1_000)
-        )
+        adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "duplicate", None, 1_000))
 
     assert calls_after_first == 1
     assert len(executor.calls) == calls_after_first
@@ -1591,16 +1552,12 @@ def test_codex_rollout_failure_is_reconciled_and_retained_before_rejection(
         executable="/opt/reviewed-codex/codex",
         model="gpt-5.4",
         effort="high",
-        attempt_sink=lambda role, attempt, execution: attempts.append(
-            (role, attempt, execution)
-        ),
+        attempt_sink=lambda role, attempt, execution: attempts.append((role, attempt, execution)),
         clock=lambda: 0.0,
     )
 
     with pytest.raises(AgentLoopError, match="missing or ambiguous"):
-        adapter.turn(
-            AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
-        )
+        adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
 
     assert events == ["execute", "reconcile"]
     assert len(attempts) == 1 and attempts[0][0:2] == (SandboxRole.AUTHOR, 1)
@@ -1630,9 +1587,7 @@ def test_codex_adapter_rejects_stdout_and_rollout_selection_contradiction(
     )
 
     with pytest.raises(AgentLoopError, match="contradictory model"):
-        adapter.turn(
-            AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000)
-        )
+        adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
 
     assert events == ["execute", "reconcile"]
 
@@ -1682,9 +1637,7 @@ def test_codex_secret_history_refreshes_before_every_cli_launch(tmp_path: Path) 
     )
 
     first = adapter.turn(AuthorRequest(1, SubjectManifest.empty(), "first", None, 1_000))
-    adapter.turn(
-        AuthorRequest(2, SubjectManifest.empty(), "revise", first.thread_id, 1_000)
-    )
+    adapter.turn(AuthorRequest(2, SubjectManifest.empty(), "revise", first.thread_id, 1_000))
 
     assert events == [
         "secret-refresh",
@@ -1776,21 +1729,21 @@ def _claude_envelope() -> bytes:
             "total_cost_usd": 0.0,
             "modelUsage": {"claude-requested": {}},
             "structured_output": {
-                "schema_version": 1,
-                "verdict": "LGTM",
-                "summary": "complete",
-                "blocked_reason": None,
-                "blocking_findings": [],
-                "non_blocking_findings": [],
+                "review": {
+                    "schema_version": 1,
+                    "verdict": "LGTM",
+                    "summary": "complete",
+                    "blocked_reason": None,
+                    "blocking_findings": [],
+                    "non_blocking_findings": [],
+                }
             },
         },
         separators=(",", ":"),
     ).encode()
 
 
-def _claude_api_request_detail(
-    *, model: str = "claude-requested", effort: str = "high"
-) -> bytes:
+def _claude_api_request_detail(*, model: str = "claude-requested", effort: str = "high") -> bytes:
     detail = json.dumps(
         {
             "model": model,
@@ -1800,11 +1753,7 @@ def _claude_api_request_detail(
         },
         separators=(",", ":"),
     ).encode()
-    return (
-        b"2026-07-20T16:42:22.627Z [VERBOSE] [API REQUEST DETAIL] "
-        + detail
-        + b"\n"
-    )
+    return b"2026-07-20T16:42:22.627Z [VERBOSE] [API REQUEST DETAIL] " + detail + b"\n"
 
 
 def _fake_managed_claude_boundary(
@@ -1894,9 +1843,7 @@ def test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts
     )
     bundle = ReviewBundle({}, b"complete-bundle", 4, "a" * 64)
 
-    turn = adapter.review(
-        CriticRequest(1, bundle, ApprovalContext(True, True, True), 1_000)
-    )
+    turn = adapter.review(CriticRequest(1, bundle, ApprovalContext(True, True, True), 1_000))
 
     assert turn.review.verdict is Verdict.LGTM
     assert turn.observed_model == "claude-requested"
@@ -1938,6 +1885,64 @@ def test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts
     )
     assert all(item.read_only for item in mounts[2:])
     assert all(item.closure_sha256 is not None for item in mounts[2:])
+
+
+def test_claude_adapter_reuses_transactional_login_without_environment_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = ScriptedExecutor(
+        stdout=_claude_envelope(),
+        stderr=_claude_api_request_detail(),
+        candidate=SubjectManifest.empty(),
+    )
+    install = tmp_path / "claude-install"
+    config = tmp_path / "transaction" / "claude-home"
+    install.mkdir()
+    config.mkdir(parents=True)
+    refreshes = 0
+    events: list[str] = []
+
+    def refresh() -> tuple[KnownSecret, ...]:
+        nonlocal refreshes
+        refreshes += 1
+        events.append("refresh")
+        return ()
+
+    adapter = SandboxedClaudeCriticAdapter(
+        executor,  # type: ignore[arg-type]
+        None,
+        install_mount=SandboxMount(str(install), "/opt/reviewed-claude"),
+        executable="/opt/reviewed-claude/claude",
+        config_dir=config,
+        managed_boundary=_fake_managed_claude_boundary(tmp_path, monkeypatch),
+        model="claude-requested",
+        effort="high",
+        secret_refresh=refresh,
+        attempt_sink=lambda _role, _round_number, _execution: events.append("sink"),
+        clock=lambda: 0.0,
+    )
+
+    turn = adapter.review(
+        CriticRequest(
+            1,
+            ReviewBundle({}, b"complete-bundle", 4, "a" * 64),
+            ApprovalContext(True, True, True),
+            1_000,
+        )
+    )
+
+    assert turn.review.verdict is Verdict.LGTM
+    assert refreshes == 2
+    assert events == ["refresh", "refresh", "sink"]
+    call = executor.calls[0]
+    environment = call["environment"]
+    assert isinstance(environment, dict)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in environment
+    mounts = call["mounts"]
+    assert isinstance(mounts, tuple)
+    assert mounts[1].target == "/control/claude-home"
+    assert mounts[1].read_only is False
 
 
 def test_claude_adapter_cross_checks_api_request_model_against_usage(
@@ -2144,9 +2149,7 @@ def test_claude_adapter_rejects_invalid_or_overlapping_managed_boundary_mounts(
         read_only=False,
     )
     with pytest.raises(ValueError, match="read-only and closure-witnessed"):
-        construct(
-            _unchecked_managed_claude_boundary(valid, policy_mount=writable_policy)
-        )
+        construct(_unchecked_managed_claude_boundary(valid, policy_mount=writable_policy))
 
     unwitnessed_helper = SandboxMount(
         valid.helper_mount.source,
@@ -2154,9 +2157,7 @@ def test_claude_adapter_rejects_invalid_or_overlapping_managed_boundary_mounts(
         read_only=True,
     )
     with pytest.raises(ValueError, match="read-only and closure-witnessed"):
-        construct(
-            _unchecked_managed_claude_boundary(valid, helper_mount=unwitnessed_helper)
-        )
+        construct(_unchecked_managed_claude_boundary(valid, helper_mount=unwitnessed_helper))
 
     wrong_target = SandboxMount(
         valid.policy_mount.source,

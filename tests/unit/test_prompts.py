@@ -37,8 +37,7 @@ def test_critic_prompt_states_exact_verdict_field_invariants() -> None:
     )
     assert (
         "BLOCKED: blocked_reason must be a non-empty, non-whitespace string "
-        "and\n  blocking_findings must be []"
-        in CRITIC_PROMPT
+        "and\n  blocking_findings must be []" in CRITIC_PROMPT
     )
     assert 'Never substitute a phrase such as "none" for JSON null.' in CRITIC_PROMPT
 

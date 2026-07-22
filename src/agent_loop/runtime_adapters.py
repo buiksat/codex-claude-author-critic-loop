@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from . import claude_managed_policy
-from .artifacts import ContentAddressedBlobStore
+from .author_service import AuthorMountDescriptor, FixedAuthorServiceClient
 from .claude_client import ClaudeClient, ClaudeInvocation
 from .codex_client import (
     CodexClient,
@@ -47,7 +47,7 @@ from .credentials import CodexCredentialTransaction, build_claude_parent_environ
 from .declassify import KnownSecret, raw_log_contains_known_secret
 from .errors import StopReason, fail
 from .manifests import SubjectManifest, verify_manifest_blobs
-from .models import EntryKind, sha256_hex
+from .models import BlobReader, BlobWriter, EntryKind, sha256_hex
 from .provenance import (
     closure_sha256,
     open_verified_closure,
@@ -106,6 +106,7 @@ _SANDBOX_INIT_COMMAND = (
     "/usr/bin/python3",
     "-I",
     "-B",
+    "-S",
     "-c",
     _SANDBOX_INIT_BOOTSTRAP,
 )
@@ -206,7 +207,15 @@ def _bind_mount_sources_to_descriptors(
             sort_keys=True,
             separators=(",", ":"),
         )
-        launcher = ("/usr/bin/python3", "-I", "-B", "-c", _MOUNT_FD_LAUNCHER, payload)
+        launcher = (
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            "-S",
+            "-c",
+            _MOUNT_FD_LAUNCHER,
+            payload,
+        )
         return launcher, tuple(retained)
     except BaseException:
         for descriptor in retained:
@@ -228,6 +237,20 @@ class ServiceRunner(Protocol):
     ) -> ServiceResult: ...
 
 
+class AuthorServiceRunner(Protocol):
+    """The fixed root-broker interface used only for production author turns."""
+
+    def run_author(
+        self,
+        *,
+        input_bytes: bytes,
+        mounts: Sequence[AuthorMountDescriptor],
+        workspace_bytes: int,
+        timeout_seconds: float,
+        limits: ServiceLimits,
+    ) -> ServiceResult: ...
+
+
 class CredentialTransaction(Protocol):
     """Structural view used to make credential ordering independently testable."""
 
@@ -235,6 +258,10 @@ class CredentialTransaction(Protocol):
     def codex_home(self) -> Path: ...
 
     def reconcile_after_turn(self) -> bool: ...
+
+
+class RuntimeBlobStore(BlobReader, BlobWriter, Protocol):
+    """Minimal blob interface accepted before and after credential release."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,8 +363,7 @@ def _frozen_toolchain_mounts(
             "/workspace",
         )
         if any(
-            target == reserved or target.startswith(reserved + "/")
-            for reserved in reserved_targets
+            target == reserved or target.startswith(reserved + "/") for reserved in reserved_targets
         ):
             raise ValueError("toolchain mount targets cannot enter private sandbox state")
         _reject_supervisor_shadow(target)
@@ -387,17 +413,20 @@ def _policy_for(
 class SandboxExecutor:
     """Run the installed trusted supervisor under Bubblewrap and systemd.
 
-    ``sandbox-init`` is the initial command in Bubblewrap's PID namespace, and
-    Bubblewrap is the main command of the transient service.  There is no host
-    subprocess fallback.  Tests may inject a service runner which executes the
-    same encoded supervisor request without requiring the pinned target host.
+    For no-network validation/Git and the tool-disabled critic,
+    ``sandbox-init`` remains the initial command in Bubblewrap's PID namespace.
+    Production author turns instead use the fixed root broker so the system
+    manager creates the outer mount/PID boundary without an outer user
+    namespace; Codex's mandatory inner permission-profile Bubblewrap can then
+    run normally.  Tests may inject either narrow service interface.
     """
 
     def __init__(
         self,
-        blobs: ContentAddressedBlobStore,
+        blobs: RuntimeBlobStore,
         *,
         service: ServiceRunner | None = None,
+        author_service: AuthorServiceRunner | None = None,
         package_root: str | os.PathLike[str] | None = None,
         limits: Limits | None = None,
         terminate_grace_ms: int = 1_000,
@@ -405,8 +434,10 @@ class SandboxExecutor:
         service_attempt_sink: ServiceAttemptSink | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
-        if not isinstance(blobs, ContentAddressedBlobStore):
-            raise TypeError("blobs must be a ContentAddressedBlobStore")
+        if not callable(getattr(blobs, "read_blob", None)) or not callable(
+            getattr(blobs, "put_blob", None)
+        ):
+            raise TypeError("blobs must implement the bounded read/write blob contract")
         if limits is not None and not isinstance(limits, Limits):
             raise TypeError("limits must be a Limits instance")
         if not callable(clock):
@@ -422,17 +453,11 @@ class SandboxExecutor:
         if (
             not isinstance(max_export_bytes, int)
             or isinstance(max_export_bytes, bool)
-            or not DEFAULT_MAX_FIELD_BYTES + 1_024
-            <= max_export_bytes
-            <= MAX_PROTOCOL_EXPORT_BYTES
+            or not DEFAULT_MAX_FIELD_BYTES + 1_024 <= max_export_bytes <= MAX_PROTOCOL_EXPORT_BYTES
         ):
             raise ValueError("max_export_bytes is outside the sandbox protocol bound")
-        selected_root = (
-            Path(__file__).parent.parent if package_root is None else Path(package_root)
-        )
-        normalized_root = Path(
-            _normalized_host_path(selected_root, name="installed package root")
-        )
+        selected_root = Path(__file__).parent.parent if package_root is None else Path(package_root)
+        normalized_root = Path(_normalized_host_path(selected_root, name="installed package root"))
         package_directory = normalized_root / "agent_loop"
         if not (package_directory / "sandbox_init.py").is_file():
             raise ValueError("installed package root does not contain agent_loop/sandbox_init.py")
@@ -452,6 +477,7 @@ class SandboxExecutor:
             raise
         self._blobs = blobs
         self._service: ServiceRunner | None = service
+        self._author_service: AuthorServiceRunner | None = author_service
         self._package_mount = SandboxMount(
             os.fspath(package_snapshot),
             f"{_RUNTIME_PACKAGE_TARGET}/agent_loop",
@@ -472,7 +498,7 @@ class SandboxExecutor:
         self._clock = clock
 
     @property
-    def blobs(self) -> ContentAddressedBlobStore:
+    def blobs(self) -> RuntimeBlobStore:
         return self._blobs
 
     @property
@@ -571,11 +597,9 @@ class SandboxExecutor:
         if not isinstance(stdin_bytes, bytes):
             raise TypeError("sandbox stdin must be bytes")
         try:
-            current_source_sha256 = python_source_closure_sha256(
-                self._package_source_directory
-            )
+            current_source_sha256 = python_source_closure_sha256(self._package_source_directory)
             current_runtime_sha256 = python_source_closure_sha256(self._package_directory)
-        except (OSError, TypeError, ValueError):
+        except OSError, TypeError, ValueError:
             raise fail(
                 StopReason.SANDBOX_SETUP_FAILURE,
                 "trusted sandbox-init package closure is no longer verifiable",
@@ -600,7 +624,7 @@ class SandboxExecutor:
             if mount.closure_sha256 is not None:
                 try:
                     current_mount_sha256 = closure_sha256(Path(source))
-                except (OSError, TypeError, ValueError):
+                except OSError, TypeError, ValueError:
                     raise fail(
                         StopReason.SANDBOX_SETUP_FAILURE,
                         "a reviewed mount closure is no longer verifiable",
@@ -612,7 +636,7 @@ class SandboxExecutor:
                     )
             try:
                 effective_mount = self._snapshot_mount(mount)
-            except (OSError, TypeError, ValueError):
+            except OSError, TypeError, ValueError:
                 raise fail(
                     StopReason.SANDBOX_SETUP_FAILURE,
                     "a reviewed mount could not be snapshotted safely",
@@ -620,7 +644,7 @@ class SandboxExecutor:
             if effective_mount.closure_sha256 is not None:
                 try:
                     snapshot_sha256 = closure_sha256(Path(effective_mount.source))
-                except (OSError, TypeError, ValueError):
+                except OSError, TypeError, ValueError:
                     raise fail(
                         StopReason.SANDBOX_SETUP_FAILURE,
                         "a private mount snapshot is no longer verifiable",
@@ -657,7 +681,6 @@ class SandboxExecutor:
             workspace_bytes=self._limits.workspace_bytes,
             mounts=policy_mounts,
         )
-        inner_command = build_bwrap_argv(policy, _SANDBOX_INIT_COMMAND)
         mount_authorities: list[int] = []
         try:
             for index, mount in enumerate(policy_mounts):
@@ -667,12 +690,20 @@ class SandboxExecutor:
                         python_sources_only=index == 0,
                     )
                 )
-            command, mount_descriptors = _bind_mount_sources_to_descriptors(
-                inner_command,
-                policy_mounts,
-                verified_descriptors=mount_authorities,
+            use_fixed_author = role is SandboxRole.AUTHOR and (
+                self._author_service is not None or self._service is None
             )
-        except (OSError, TypeError, ValueError):
+            if use_fixed_author:
+                command: tuple[str, ...] | None = None
+                mount_descriptors = tuple(os.dup(descriptor) for descriptor in mount_authorities)
+            else:
+                inner_command = build_bwrap_argv(policy, _SANDBOX_INIT_COMMAND)
+                command, mount_descriptors = _bind_mount_sources_to_descriptors(
+                    inner_command,
+                    policy_mounts,
+                    verified_descriptors=mount_authorities,
+                )
+        except OSError, TypeError, ValueError:
             raise fail(
                 StopReason.SANDBOX_SETUP_FAILURE,
                 "sandbox mount identities could not be retained before launch",
@@ -693,7 +724,10 @@ class SandboxExecutor:
         )
         self._service_attempt_number += 1
         service_attempt_number = self._service_attempt_number
-        retained_by_service = self._service is None and self._service_attempt_sink is not None
+        retained_by_service = self._service_attempt_sink is not None and (
+            (use_fixed_author and self._author_service is None)
+            or (not use_fixed_author and self._service is None)
+        )
 
         def retain_service_result(result: ServiceResult) -> None:
             if self._service_attempt_sink is not None:
@@ -705,21 +739,45 @@ class SandboxExecutor:
                     float(self._clock()),
                 )
 
-        service_runner: ServiceRunner = (
-            TransientServiceRunner(
-                result_sink=retain_service_result if retained_by_service else None
-            )
-            if self._service is None
-            else self._service
-        )
         try:
-            service_result = service_runner.run(
-                command,
-                role=role.value,
-                input_bytes=encoded,
-                timeout_seconds=service_timeout,
-                limits=service_limits,
-            )
+            if use_fixed_author:
+                author_runner: AuthorServiceRunner = (
+                    FixedAuthorServiceClient(
+                        result_sink=retain_service_result if retained_by_service else None
+                    )
+                    if self._author_service is None
+                    else self._author_service
+                )
+                service_result = author_runner.run_author(
+                    input_bytes=encoded,
+                    mounts=tuple(
+                        AuthorMountDescriptor(mount, descriptor)
+                        for mount, descriptor in zip(
+                            policy_mounts,
+                            mount_descriptors,
+                            strict=True,
+                        )
+                    ),
+                    workspace_bytes=self._limits.workspace_bytes,
+                    timeout_seconds=service_timeout,
+                    limits=service_limits,
+                )
+            else:
+                assert command is not None
+                service_runner: ServiceRunner = (
+                    TransientServiceRunner(
+                        result_sink=retain_service_result if retained_by_service else None
+                    )
+                    if self._service is None
+                    else self._service
+                )
+                service_result = service_runner.run(
+                    command,
+                    role=role.value,
+                    input_bytes=encoded,
+                    timeout_seconds=service_timeout,
+                    limits=service_limits,
+                )
         finally:
             for descriptor in mount_descriptors:
                 os.close(descriptor)
@@ -967,9 +1025,7 @@ class SandboxedValidationAdapter:
         for check, record in zip(self._checks, records, strict=False):
             started_at = cursor
             cursor += record.duration_ms / 1_000
-            command_unexecutable = (
-                record.returncode in {126, 127} and not record.output_limited
-            )
+            command_unexecutable = record.returncode in {126, 127} and not record.output_limited
             executions.append(
                 CheckExecution(
                     check.check_id,
@@ -1002,13 +1058,16 @@ class SandboxedValidationAdapter:
 
 
 def _validation_log_header(check_id: str, stream: str) -> bytes:
-    return json.dumps(
-        {"check_id": check_id, "stream": stream},
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii") + b"\n"
+    return (
+        json.dumps(
+            {"check_id": check_id, "stream": stream},
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
 
 
 def _reviewed_install(
@@ -1042,8 +1101,7 @@ def _reviewed_managed_claude_boundary(
     if not isinstance(boundary, claude_managed_policy.ManagedClaudeBoundary):
         raise TypeError("managed_boundary must be a ManagedClaudeBoundary")
     if (
-        boundary.protocol
-        != claude_managed_policy.MANAGED_CLAUDE_BOUNDARY_PROTOCOL
+        boundary.protocol != claude_managed_policy.MANAGED_CLAUDE_BOUNDARY_PROTOCOL
         or boundary.probe_id != claude_managed_policy.MANAGED_CLAUDE_BOUNDARY_ID
     ):
         raise ValueError("managed Claude boundary identity is unsupported")
@@ -1069,9 +1127,7 @@ def _reviewed_managed_claude_boundary(
         if mount.source != source or mount.target != target:
             raise ValueError(f"managed Claude {name} mount path is not the fixed path")
         if not mount.read_only or mount.closure_sha256 is None:
-            raise ValueError(
-                f"managed Claude {name} mount must be read-only and closure-witnessed"
-            )
+            raise ValueError(f"managed Claude {name} mount must be read-only and closure-witnessed")
         _normalized_host_path(mount.source, name=f"managed Claude {name} source")
         _normalized_sandbox_path(mount.target, name=f"managed Claude {name} target")
         _reject_supervisor_shadow(mount.target)
@@ -1311,7 +1367,7 @@ class SandboxedCodexAuthorAdapter:
             if not isinstance(value, dict):
                 raise fail(StopReason.AUTHOR_PROCESS_FAILURE, "Codex event was not an object")
             events.append(value)
-        usage = {
+        usage: dict[str, object] = {
             "input_tokens": result.usage.input_tokens,
             "cached_input_tokens": result.usage.cached_input_tokens,
             "output_tokens": result.usage.output_tokens,
@@ -1339,7 +1395,7 @@ class SandboxedClaudeCriticAdapter:
     def __init__(
         self,
         executor: SandboxExecutor,
-        token: str,
+        token: str | None,
         *,
         install_mount: SandboxMount,
         executable: str,
@@ -1348,6 +1404,7 @@ class SandboxedClaudeCriticAdapter:
         timeout_seconds: float = DEFAULT_CRITIC_TIMEOUT_SECONDS,
         model: str | None = None,
         effort: str | None = None,
+        secret_refresh: Callable[[], tuple[KnownSecret, ...]] | None = None,
         attempt_sink: AttemptSink | None = None,
         clock: Clock = time.monotonic,
     ) -> None:
@@ -1360,8 +1417,9 @@ class SandboxedClaudeCriticAdapter:
         config_source = _normalized_host_path(config_dir, name="generated Claude config")
         if not Path(config_source).is_dir():
             raise ValueError("generated Claude config mount must be a directory")
-        # Validate the dedicated token without copying or consulting ambient
-        # authentication state.  The environment is rebuilt per fresh round.
+        # Validate the selected authentication adapter.  A setup token stays
+        # parent-only; a transaction-backed Claude login instead refreshes its
+        # private .credentials.json through the writable control mount.
         build_claude_parent_environment(
             token,
             config_dir="/control/claude-home",
@@ -1369,13 +1427,16 @@ class SandboxedClaudeCriticAdapter:
         )
         self._executor = executor
         self._token = token
-        self._token_secret = (KnownSecret("claude-setup-token", token.encode("utf-8")),)
+        self._secret_refresh = secret_refresh
+        self._token_secret = (
+            () if token is None else (KnownSecret("claude-setup-token", token.encode("utf-8")),)
+        )
         self._install_mount = reviewed_mount
         self._executable = reviewed_executable
         self._config_mount = SandboxMount(
             config_source,
             "/control/claude-home",
-            read_only=True,
+            read_only=token is not None,
         )
         (
             self._managed_policy_mount,
@@ -1407,7 +1468,10 @@ class SandboxedClaudeCriticAdapter:
                 StopReason.CRITIC_TIMEOUT,
                 "remaining critic deadline does not exceed the pinned API timeout",
             )
-        if raw_log_contains_known_secret(request.bundle.encoded, self._token_secret):
+        current_secrets = self._token_secret
+        if self._secret_refresh is not None:
+            current_secrets = tuple(dict.fromkeys((*current_secrets, *self._secret_refresh())))
+        if raw_log_contains_known_secret(request.bundle.encoded, current_secrets):
             raise fail(
                 StopReason.REVIEW_CONTENT_WITHHELD,
                 "critic bundle contains dedicated credential material",
@@ -1446,12 +1510,16 @@ class SandboxedClaudeCriticAdapter:
                     StopReason.OUT_OF_BAND_CHANGE,
                     "tool-disabled critic changed its empty sandbox subject",
                 )
+            if self._secret_refresh is not None:
+                refreshed = self._secret_refresh()
+            else:
+                refreshed = ()
             if raw_log_contains_known_secret(
                 captured.result.process.stdout
                 + captured.result.process.stderr
                 + captured.service.process.stdout
                 + captured.service.process.stderr,
-                self._token_secret,
+                tuple(dict.fromkeys((*current_secrets, *refreshed))),
             ):
                 raise fail(
                     StopReason.CREDENTIAL_REFRESH_FAILURE,

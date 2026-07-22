@@ -46,9 +46,7 @@ _MAX_ROLLOUT_BYTES = 64 * 1024 * 1024
 _MAX_ROLLOUT_EVENTS = 200_000
 _MAX_ROLLOUT_LINE_BYTES = DEFAULT_MAX_AGENT_OUTPUT_BYTES
 _MAX_ROLLOUT_NAMESPACE_ENTRIES = 256
-_UUID = re.compile(
-    rb"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
+_UUID = re.compile(rb"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _ROLLOUT_FILE = re.compile(
     rb"^rollout-(\d{4})-(\d{2})-(\d{2})T"
     rb"(?:[01]\d|2[0-3])-[0-5]\d-[0-5]\d-"
@@ -102,19 +100,72 @@ _ROLLOUT_EVENT_TYPES = frozenset(
     }
 )
 _FIXED_WORKSPACE_DENIES = (
-    ".git",
+    # ``:workspace`` already reserves the top-level .git and .codex mount
+    # targets.  Re-declaring those exact paths makes pinned Codex 0.144.6 ask
+    # Bubblewrap to create a file over its own directory mount and the command
+    # sandbox fails before the generated command can run.  Descendant/nested
+    # denies retain the explicit fail-closed layer without colliding with the
+    # built-in mount registry.
     ".git/**",
     "**/.git",
     "**/.git/**",
-    ".codex",
     ".codex/**",
     "AGENTS.md",
     "AGENTS.override.md",
     "**/AGENTS.md",
     "**/AGENTS.override.md",
 )
-_FIXED_GIT_DENIES = frozenset(_FIXED_WORKSPACE_DENIES[:4])
+_FIXED_GIT_DENIES = frozenset((".git/**", "**/.git", "**/.git/**"))
+_RESERVED_WORKSPACE_MOUNT_TARGETS = frozenset((".git", ".codex"))
 _ALLOWED_CODEX_HOME_NAMES = {b"auth.json", b"config.toml", b"sessions"}
+_CODEX_CACHE_MOUNTPOINTS = (b".tmp", b"plugins", b"skills", b"tmp")
+_DISABLED_CODEX_FEATURES = (
+    "apps",
+    "goals",
+    "hooks",
+    "memories",
+    "multi_agent",
+    "personality",
+    "remote_plugin",
+    "shell_snapshot",
+    "skill_mcp_dependency_install",
+    "tool_call_mcp_elicitation",
+)
+_DISABLED_SYSTEM_SKILLS = (
+    "imagegen",
+    "openai-docs",
+    "plugin-creator",
+    "skill-creator",
+    "skill-installer",
+)
+_FORBIDDEN_CONTROL_CONTEXT_MARKERS = (
+    b"<apps_instructions>",
+    b"<plugins_instructions>",
+    b"<skills_instructions>",
+    b"request_plugin_install",
+    b"tool_search",
+)
+_COMMAND_SANDBOX_SETUP_FAILURE_MARKERS = (
+    "bwrap: No permissions to create a new namespace",
+    "bwrap: Can't create file at /workspace/.git: Is a directory",
+    "bwrap: Can't create file at /workspace/.codex: Is a directory",
+    "failed to create synthetic bubblewrap mount registry",
+    "permission profiles requiring direct runtime enforcement are incompatible with "
+    "--use-legacy-landlock",
+)
+_REAUTHENTICATION_FAILURE_MARKERS = (
+    "refresh token was revoked",
+    "refresh_token_invalidated",
+    "token_revoked",
+    "please log out and sign in again",
+)
+CODEX_REAUTHENTICATION_FAILURE_DETAIL = (
+    "Codex vendor session ended; run `codex login` once, then rerun. "
+    "No `agent-loop auth` command is required."
+)
+CODEX_REAUTHENTICATION_NEXT_ACTION = (
+    "Run `codex login` once, then rerun this command. No `agent-loop auth` command is required."
+)
 
 
 def _quoted(value: str) -> str:
@@ -196,18 +247,20 @@ class SanitizedCodexConfig:
         if len(set(self.additional_host_denies)) != len(self.additional_host_denies):
             raise ValueError("host deny paths contain duplicates")
 
-    def render(self) -> bytes:
+    def render(self, *, codex_home: str = SANDBOX_CODEX_HOME) -> bytes:
+        selected_codex_home = _normalized_absolute(codex_home, name="CODEX_HOME")
         candidates = tuple(
-            dict.fromkeys((*_FIXED_WORKSPACE_DENIES, *self.additional_workspace_denies))
+            pattern
+            for pattern in dict.fromkeys(
+                (*_FIXED_WORKSPACE_DENIES, *self.additional_workspace_denies)
+            )
+            if pattern not in _RESERVED_WORKSPACE_MOUNT_TARGETS
         )
         workspace_denies = tuple(
             pattern
             for pattern in candidates
             if pattern in _FIXED_GIT_DENIES
-            or not any(
-                _deny_blocks_opt_in(pattern, path)
-                for path in self.workspace_opt_ins
-            )
+            or not any(_deny_blocks_opt_in(pattern, path) for path in self.workspace_opt_ins)
         )
         lines: list[str] = []
         if self.model is not None:
@@ -220,16 +273,31 @@ class SanitizedCodexConfig:
                 'approval_policy = "never"',
                 'web_search = "disabled"',
                 'cli_auth_credentials_store = "file"',
+                "include_apps_instructions = false",
+                "include_collaboration_mode_instructions = false",
                 "",
                 "[features]",
-                "hooks = false",
+                *tuple(f"{feature} = false" for feature in _DISABLED_CODEX_FEATURES),
                 "",
+            )
+        )
+        for skill in _DISABLED_SYSTEM_SKILLS:
+            lines.extend(
+                (
+                    "[[skills.config]]",
+                    "path = " + _quoted(f"{selected_codex_home}/skills/.system/{skill}/SKILL.md"),
+                    "enabled = false",
+                    "",
+                )
+            )
+        lines.extend(
+            (
                 f'[projects."{AUTHOR_WORKSPACE}"]',
                 'trust_level = "untrusted"',
                 "",
                 "[shell_environment_policy]",
                 'inherit = "none"',
-                "set = { PATH = \"/usr/local/bin:/usr/bin:/bin\", "
+                'set = { PATH = "/usr/local/bin:/usr/bin:/bin", '
                 'HOME = "/runtime/home", TMPDIR = "/runtime/tmp", LANG = "C.UTF-8" }',
                 "",
                 f"[permissions.{AUTHOR_PERMISSION_PROFILE}]",
@@ -243,14 +311,14 @@ class SanitizedCodexConfig:
                 '"/control" = "deny"',
             )
         )
-        lines.extend(f"{_quoted(path)} = \"deny\"" for path in self.additional_host_denies)
+        lines.extend(f'{_quoted(path)} = "deny"' for path in self.additional_host_denies)
         lines.extend(
             (
                 "",
                 f'[permissions.{AUTHOR_PERMISSION_PROFILE}.filesystem.":workspace_roots"]',
             )
         )
-        lines.extend(f"{_quoted(pattern)} = \"deny\"" for pattern in workspace_denies)
+        lines.extend(f'{_quoted(pattern)} = "deny"' for pattern in workspace_denies)
         lines.extend(
             (
                 "",
@@ -260,14 +328,19 @@ class SanitizedCodexConfig:
             )
         )
         encoded = "\n".join(lines).encode("ascii")
-        _validate_rendered_config(encoded, self)
+        _validate_rendered_config(encoded, self, codex_home=selected_codex_home)
         return encoded
 
 
-def _validate_rendered_config(data: bytes, expected: SanitizedCodexConfig) -> None:
+def _validate_rendered_config(
+    data: bytes,
+    expected: SanitizedCodexConfig,
+    *,
+    codex_home: str,
+) -> None:
     try:
         parsed = tomllib.loads(data.decode("ascii"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except UnicodeDecodeError, tomllib.TOMLDecodeError:
         raise ValueError("generated Codex config is not valid TOML") from None
     if parsed.get("default_permissions") != AUTHOR_PERMISSION_PROFILE:
         raise ValueError("generated Codex config lost the mandatory permission profile")
@@ -275,8 +348,22 @@ def _validate_rendered_config(data: bytes, expected: SanitizedCodexConfig) -> No
         raise ValueError("generated Codex config weakened approval or search policy")
     if parsed.get("cli_auth_credentials_store") != "file":
         raise ValueError("generated Codex config selected an unsupported credential adapter")
-    if parsed.get("features") != {"hooks": False}:
-        raise ValueError("generated Codex config did not disable hooks")
+    if parsed.get("include_apps_instructions") is not False or (
+        parsed.get("include_collaboration_mode_instructions") is not False
+    ):
+        raise ValueError("generated Codex config did not disable ambient instruction blocks")
+    if parsed.get("features") != dict.fromkeys(_DISABLED_CODEX_FEATURES, False):
+        raise ValueError("generated Codex config did not disable ambient features")
+    skills = parsed.get("skills")
+    expected_skill_entries = [
+        {
+            "path": f"{codex_home}/skills/.system/{skill}/SKILL.md",
+            "enabled": False,
+        }
+        for skill in _DISABLED_SYSTEM_SKILLS
+    ]
+    if not isinstance(skills, dict) or skills.get("config") != expected_skill_entries:
+        raise ValueError("generated Codex config did not disable every bundled system skill")
     shell_policy = parsed.get("shell_environment_policy")
     if not isinstance(shell_policy, dict) or shell_policy.get("inherit") != "none":
         raise ValueError("generated Codex config did not scrub command environments")
@@ -296,15 +383,12 @@ def _validate_rendered_config(data: bytes, expected: SanitizedCodexConfig) -> No
     candidates = {
         *_FIXED_WORKSPACE_DENIES,
         *expected.additional_workspace_denies,
-    }
+    } - _RESERVED_WORKSPACE_MOUNT_TARGETS
     required_workspace_denies = {
         pattern
         for pattern in candidates
         if pattern in _FIXED_GIT_DENIES
-        or not any(
-            _deny_blocks_opt_in(pattern, path)
-            for path in expected.workspace_opt_ins
-        )
+        or not any(_deny_blocks_opt_in(pattern, path) for path in expected.workspace_opt_ins)
     }
     if not isinstance(workspace, dict) or any(
         workspace.get(path) != "deny" for path in required_workspace_denies
@@ -334,20 +418,56 @@ def install_sanitized_codex_config(
         directory_fd = filesystem.open_directory()
         try:
             names = {os.fsencode(name) for name in os.listdir(directory_fd)}
+            unexpected = names - _ALLOWED_CODEX_HOME_NAMES
+            if unexpected:
+                raise fail(
+                    StopReason.PROJECT_INSTRUCTION_ISOLATION,
+                    "transactional Codex home contains unreviewed ambient state",
+                )
+            for name in names:
+                try:
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError:
+                    raise fail(
+                        StopReason.PROJECT_INSTRUCTION_ISOLATION,
+                        "transactional Codex home contains unsafe runtime state",
+                    ) from None
+                mode = stat.S_IMODE(info.st_mode)
+                if name in {b"auth.json", b"config.toml"}:
+                    valid = (
+                        stat.S_ISREG(info.st_mode)
+                        and info.st_uid == os.geteuid()
+                        and info.st_nlink == 1
+                        and mode == PRIVATE_FILE_MODE
+                    )
+                else:
+                    valid = (
+                        stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and mode == 0o700
+                    )
+                if not valid:
+                    raise fail(
+                        StopReason.PROJECT_INSTRUCTION_ISOLATION,
+                        "transactional Codex home contains unsafe runtime state",
+                    )
         finally:
             os.close(directory_fd)
-        unexpected = names - _ALLOWED_CODEX_HOME_NAMES
-        if unexpected:
-            raise fail(
-                StopReason.PROJECT_INSTRUCTION_ISOLATION,
-                "transactional Codex home contains unreviewed ambient state",
-            )
         filesystem.atomic_write(
             b"config.toml",
             config.render(),
             mode=PRIVATE_FILE_MODE,
             create_parents=False,
         )
+        # systemd otherwise creates nested TemporaryFileSystem destinations as
+        # root while preparing the transient author unit.  Pre-create every
+        # disposable cache mountpoint under the account lock so the underlying
+        # directories remain private and removable by the operator.
+        directory_fd = filesystem.open_directory()
+        try:
+            for name in _CODEX_CACHE_MOUNTPOINTS:
+                os.mkdir(name, mode=0o700, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         filesystem.close()
     return transaction.codex_home / "config.toml"
@@ -612,7 +732,7 @@ def _parse_json_object(line: bytes) -> dict[str, object]:
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_constant,
         )
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except UnicodeDecodeError, ValueError, RecursionError:
         raise _invalid_protocol("Codex emitted malformed or duplicate-key JSONL") from None
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise _invalid_protocol("Codex JSONL event must be an object with string keys")
@@ -720,10 +840,7 @@ def _rollout_lifecycle_turn_id(
                     allow_empty=False,
                 )
             )
-            or (
-                "started_at" in payload
-                and not _nonnegative_integer(payload.get("started_at"))
-            )
+            or ("started_at" in payload and not _nonnegative_integer(payload.get("started_at")))
             or not _nonnegative_integer_or_none(payload.get("model_context_window"))
             or payload.get("collaboration_mode_kind") not in {"default", "plan"}
         ):
@@ -749,6 +866,34 @@ def _usage(value: object) -> CodexUsage:
         output_tokens=count("output_tokens", required=True),
         reasoning_output_tokens=count("reasoning_output_tokens", required=False),
     )
+
+
+def _reject_command_sandbox_setup_failure(item: dict[str, object]) -> None:
+    """Turn pinned command-sandbox startup failures into a typed fatal result.
+
+    A model can continue after a failed tool call and claim completion in prose.
+    These backend diagnostics mean no model-generated command could have run
+    under the required permission profile, so accepting the turn would be an
+    integrity failure.  Never include the untrusted command output in the
+    externally visible error.
+    """
+
+    if item.get("type") != "command_execution" or item.get("status") != "failed":
+        return
+    exit_code = item.get("exit_code")
+    output = item.get("aggregated_output")
+    if (
+        not isinstance(exit_code, int)
+        or isinstance(exit_code, bool)
+        or exit_code == 0
+        or not isinstance(output, str)
+    ):
+        return
+    if any(marker in output for marker in _COMMAND_SANDBOX_SETUP_FAILURE_MARKERS):
+        raise fail(
+            StopReason.SANDBOX_SETUP_FAILURE,
+            "Codex command sandbox could not initialize",
+        )
 
 
 def parse_codex_jsonl(
@@ -819,16 +964,14 @@ def parse_codex_jsonl(
             if thread_id is not None:
                 raise _invalid_protocol("Codex emitted multiple thread.started events")
             raw_thread_id = event.get("thread_id")
-            if (
-                not isinstance(raw_thread_id, str)
-                or _THREAD_ID.fullmatch(raw_thread_id) is None
-            ):
+            if not isinstance(raw_thread_id, str) or _THREAD_ID.fullmatch(raw_thread_id) is None:
                 raise _invalid_protocol("Codex thread.started event has no valid thread ID")
             thread_id = raw_thread_id
         elif event_type == "item.completed":
             item = event.get("item")
             if not isinstance(item, dict):
                 raise _invalid_protocol("Codex item.completed event has no item object")
+            _reject_command_sandbox_setup_failure(item)
             if (
                 item.get("type") == "error"
                 and isinstance(item.get("message"), str)
@@ -913,17 +1056,14 @@ def parse_codex_rollout_selection(
         if (
             not isinstance(expected_previous_turn_ids, tuple)
             or not expected_previous_turn_ids
-            or any(
-                not isinstance(turn_id, str)
-                for turn_id in expected_previous_turn_ids
-            )
+            or any(not isinstance(turn_id, str) for turn_id in expected_previous_turn_ids)
             or len(expected_previous_turn_ids) != len(set(expected_previous_turn_ids))
         ):
             raise ValueError("expected previous Codex turn IDs are invalid")
         for turn_id in expected_previous_turn_ids:
             try:
                 encoded_turn_id = turn_id.encode("ascii", errors="strict")
-            except (AttributeError, UnicodeEncodeError):
+            except AttributeError, UnicodeEncodeError:
                 raise ValueError("expected previous Codex turn IDs are invalid") from None
             if _UUID.fullmatch(encoded_turn_id) is None:
                 raise ValueError("expected previous Codex turn IDs are invalid")
@@ -943,8 +1083,7 @@ def parse_codex_rollout_selection(
         if (
             len(data) <= prefix_length
             or data[prefix_length - 1 : prefix_length] != b"\n"
-            or hashlib.sha256(data[:prefix_length]).digest()
-            != expected_prefix_witness.sha256
+            or hashlib.sha256(data[:prefix_length]).digest() != expected_prefix_witness.sha256
         ):
             raise _invalid_protocol("Codex rollout did not preserve its accepted byte prefix")
 
@@ -975,9 +1114,7 @@ def parse_codex_rollout_selection(
         payload = event.get("payload")
         try:
             encoded_timestamp = (
-                timestamp.encode("utf-8", errors="strict")
-                if isinstance(timestamp, str)
-                else b""
+                timestamp.encode("utf-8", errors="strict") if isinstance(timestamp, str) else b""
             )
         except UnicodeEncodeError:
             raise _invalid_protocol("Codex rollout event metadata is invalid") from None
@@ -995,6 +1132,12 @@ def parse_codex_rollout_selection(
             raise _invalid_protocol("Codex rollout item type is unsupported")
         if index == 0 and event_type != "session_meta":
             raise _invalid_protocol("Codex rollout must start with session metadata")
+        if event_type == "response_item" and payload.get("role") == "developer":
+            lowered = raw_line.lower()
+            if any(marker in lowered for marker in _FORBIDDEN_CONTROL_CONTEXT_MARKERS):
+                raise _invalid_protocol(
+                    "Codex rollout contains forbidden skill, plugin, or app instructions"
+                )
 
         if event_type == "session_meta":
             session_meta_count += 1
@@ -1144,7 +1287,7 @@ def _private_rollout_file(
     _require_private_rollout_entry(before, directory=False)
     try:
         descriptor = open_beneath(parent_fd, name, os.O_RDONLY)
-    except (AgentLoopError, OSError, TypeError, ValueError):
+    except AgentLoopError, OSError, TypeError, ValueError:
         raise _invalid_protocol("Codex rollout file cannot be opened safely") from None
     try:
         opened = os.fstat(descriptor)
@@ -1157,8 +1300,7 @@ def _private_rollout_file(
         except OSError:
             raise _invalid_protocol("Codex rollout file metadata is unverifiable") from None
         if attributes or not (
-            _same_rollout_metadata(opened, after)
-            and _same_rollout_metadata(after, current)
+            _same_rollout_metadata(opened, after) and _same_rollout_metadata(after, current)
         ):
             raise _invalid_protocol("Codex rollout file metadata is ambiguous")
         return descriptor, after
@@ -1201,17 +1343,11 @@ def _walk_private_rollout_namespace(
                 (depth == 0 and re.fullmatch(rb"\d{4}", name) is None)
                 or (
                     depth == 1
-                    and (
-                        re.fullmatch(rb"\d{2}", name) is None
-                        or not 1 <= int(name) <= 12
-                    )
+                    and (re.fullmatch(rb"\d{2}", name) is None or not 1 <= int(name) <= 12)
                 )
                 or (
                     depth == 2
-                    and (
-                        re.fullmatch(rb"\d{2}", name) is None
-                        or not 1 <= int(name) <= 31
-                    )
+                    and (re.fullmatch(rb"\d{2}", name) is None or not 1 <= int(name) <= 31)
                 )
             ):
                 raise _invalid_protocol("Codex rollout date directory is invalid")
@@ -1222,7 +1358,7 @@ def _walk_private_rollout_namespace(
                     name,
                     os.O_RDONLY | os.O_DIRECTORY,
                 )
-            except (AgentLoopError, OSError, TypeError, ValueError):
+            except AgentLoopError, OSError, TypeError, ValueError:
                 raise _invalid_protocol("Codex rollout directory cannot be opened safely") from None
             try:
                 child_opened = os.fstat(child_fd)
@@ -1329,7 +1465,7 @@ def read_codex_rollout_selection(
 
     try:
         filesystem = ConfinedFilesystem.open(Path(codex_home) / "sessions")
-    except (AgentLoopError, OSError, TypeError, ValueError):
+    except AgentLoopError, OSError, TypeError, ValueError:
         raise _invalid_protocol("Codex rollout root cannot be opened safely") from None
     with filesystem:
         candidates: list[tuple[int, os.stat_result]] = []
@@ -1384,12 +1520,8 @@ def attach_codex_rollout_selection(
         expected_previous_turn_ids=expected_previous_turn_ids,
         expected_prefix_witness=expected_prefix_witness,
     )
-    observed_model = _coalesce_fact(
-        result.observed_model, evidence.model, name="model"
-    )
-    observed_effort = _coalesce_fact(
-        result.observed_effort, evidence.effort, name="effort"
-    )
+    observed_model = _coalesce_fact(result.observed_model, evidence.model, name="model")
+    observed_effort = _coalesce_fact(result.observed_effort, evidence.effort, name="effort")
     if observed_model != expected_model or observed_effort != expected_effort:
         raise _invalid_protocol("Codex rollout did not confirm the requested selection")
     return (
@@ -1408,7 +1540,7 @@ def _nonzero_codex_jsonl_facts(
     *,
     expected_thread_id: str | None,
     max_bytes: int,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, bool]:
     """Return content-free structural facts for one unsuccessful CLI result.
 
     Codex failure messages and stderr are untrusted model/control output and can
@@ -1424,22 +1556,22 @@ def _nonzero_codex_jsonl_facts(
     if expected_thread_id is not None:
         _validate_thread_id(expected_thread_id)
     if len(data) > max_bytes:
-        return "over_limit", "unverified", "unverified"
+        return "over_limit", "unverified", "unverified", False
     if not data:
-        return "empty", "false", "none"
+        return "empty", "false", "none", False
 
     raw_lines = data.split(b"\n")
     if raw_lines and raw_lines[-1] == b"":
         raw_lines.pop()
     if not raw_lines or len(raw_lines) > _MAX_JSONL_EVENTS:
-        return "invalid", "unverified", "unverified"
+        return "invalid", "unverified", "unverified", False
 
     lines: list[bytes] = []
     for raw_line in raw_lines:
         if raw_line.endswith(b"\r"):
             raw_line = raw_line[:-1]
         if not raw_line or b"\r" in raw_line or len(raw_line) > _MAX_JSONL_LINE_BYTES:
-            return "invalid", "unverified", "unverified"
+            return "invalid", "unverified", "unverified", False
         lines.append(raw_line)
 
     events: list[dict[str, object]] = []
@@ -1448,23 +1580,23 @@ def _nonzero_codex_jsonl_facts(
             event = _parse_json_object(line)
             event_type = event.get("type")
             if not isinstance(event_type, str) or not event_type:
-                return "invalid", "unverified", "unverified"
+                return "invalid", "unverified", "unverified", False
             events.append(event)
     except AgentLoopError:
         # _parse_json_object uses fixed diagnostics and never interpolates the
         # malformed line.  Do not forward even that internal parser exception.
-        return "invalid", "unverified", "unverified"
+        return "invalid", "unverified", "unverified", False
 
     if events[0].get("type") != "thread.started":
-        return "invalid", "false", "unverified"
+        return "invalid", "false", "unverified", False
     started_events = tuple(event for event in events if event.get("type") == "thread.started")
     if len(started_events) != 1:
-        return "invalid", "unverified", "unverified"
+        return "invalid", "unverified", "unverified", False
     thread_id = started_events[0].get("thread_id")
     if not isinstance(thread_id, str) or _THREAD_ID.fullmatch(thread_id) is None:
-        return "invalid", "unverified", "unverified"
+        return "invalid", "unverified", "unverified", False
     if expected_thread_id is not None and thread_id != expected_thread_id:
-        return "invalid", "unverified", "unverified"
+        return "invalid", "unverified", "unverified", False
 
     def valid_failure_message(value: object) -> bool:
         if not isinstance(value, str) or "\x00" in value:
@@ -1480,29 +1612,35 @@ def _nonzero_codex_jsonl_facts(
         if event_type == "turn.failed":
             error = event.get("error")
             if set(event) != {"type", "error"} or not isinstance(error, dict):
-                return "invalid", "unverified", "unverified"
-            if set(error) != {"message"} or not valid_failure_message(
-                error.get("message")
-            ):
-                return "invalid", "unverified", "unverified"
+                return "invalid", "unverified", "unverified", False
+            if set(error) != {"message"} or not valid_failure_message(error.get("message")):
+                return "invalid", "unverified", "unverified", False
         elif event_type == "error":
-            if set(event) != {"type", "message"} or not valid_failure_message(
-                event.get("message")
-            ):
-                return "invalid", "unverified", "unverified"
+            if set(event) != {"type", "message"} or not valid_failure_message(event.get("message")):
+                return "invalid", "unverified", "unverified", False
 
     terminal_event = "none"
     last = events[-1]
     last_type = last.get("type")
     failed_count = sum(event.get("type") == "turn.failed" for event in events)
     if failed_count and (failed_count != 1 or last_type != "turn.failed"):
-        return "invalid", "unverified", "unverified"
+        return "invalid", "unverified", "unverified", False
     if last_type == "turn.failed":
         terminal_event = "turn.failed"
     elif last_type == "error":
         terminal_event = "error"
 
-    return "valid", "true", terminal_event
+    reauthentication_required = False
+    if last_type == "turn.failed":
+        error = last.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str):
+            lowered = message.lower()
+            reauthentication_required = any(
+                marker in lowered for marker in _REAUTHENTICATION_FAILURE_MARKERS
+            )
+
+    return "valid", "true", terminal_event, reauthentication_required
 
 
 def classify_codex_process_result(
@@ -1520,11 +1658,21 @@ def classify_codex_process_result(
     if result.timed_out:
         raise fail(StopReason.AUTHOR_TIMEOUT, "Codex exceeded the outer author timeout")
     if result.returncode != 0:
-        stdout_protocol, thread_started, terminal_event = _nonzero_codex_jsonl_facts(
+        (
+            stdout_protocol,
+            thread_started,
+            terminal_event,
+            reauthentication_required,
+        ) = _nonzero_codex_jsonl_facts(
             result.stdout,
             expected_thread_id=expected_thread_id,
             max_bytes=max_bytes,
         )
+        if reauthentication_required:
+            raise fail(
+                StopReason.CREDENTIAL_REFRESH_FAILURE,
+                CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+            )
         raise fail(
             StopReason.AUTHOR_PROCESS_FAILURE,
             "Codex process exited unsuccessfully "
@@ -1589,11 +1737,13 @@ __all__ = [
     "AUTHOR_CWD",
     "AUTHOR_PERMISSION_PROFILE",
     "AUTHOR_WORKSPACE",
+    "CODEX_REAUTHENTICATION_FAILURE_DETAIL",
+    "CODEX_REAUTHENTICATION_NEXT_ACTION",
+    "SANDBOX_CODEX_HOME",
     "CodexClient",
     "CodexInvocation",
     "CodexTurnResult",
     "CodexUsage",
-    "SANDBOX_CODEX_HOME",
     "SanitizedCodexConfig",
     "build_codex_exec_help_argv",
     "build_codex_first_argv",

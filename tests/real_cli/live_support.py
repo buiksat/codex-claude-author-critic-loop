@@ -5,19 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 import pytest
 
-from agent_loop.capabilities import (
-    CAPABILITY_RECEIPT_RELATIVE_PATH,
-    REQUIRED_ACCEPTANCE_GATES,
-    LiveCapabilityBinding,
-    ManagedClaudeBoundaryCapabilityBinding,
-    write_successful_live_capability_receipt,
+from agent_loop.author_service import (
+    AuthorMountDescriptor,
+    FixedAuthorServiceClient,
 )
 from agent_loop.claude_managed_policy import (
     MANAGED_CLAUDE_BOUNDARY_ID,
@@ -26,10 +23,8 @@ from agent_loop.claude_managed_policy import (
     inspect_managed_claude_boundary,
 )
 from agent_loop.constants import SUPPORTED_CLAUDE_VERSION, SUPPORTED_CODEX_VERSION
-from agent_loop.preflight import run_preflight
 from agent_loop.provenance import (
     closure_sha256,
-    installed_runtime_closure_sha256,
     verify_safe_ancestors,
 )
 from agent_loop.sandbox import SandboxMount
@@ -47,6 +42,10 @@ _REQUIRED_GATE_NODEIDS = frozenset(
             "test_009_sandbox_init_is_pid_one_and_workspace_has_no_host_backing"
         ),
         "tests/host/test_service.py::test_071_transient_service_lifecycle",
+        (
+            "tests/host/test_author_service.py::"
+            "test_076_fixed_author_manager_is_root_owned_bound_and_live"
+        ),
         (
             "tests/host/test_service_cleanup.py::"
             "test_029_sets_id_orphan_is_reaped_before_export_and_cgroup_collection"
@@ -88,21 +87,6 @@ _REQUIRED_GATE_NODEIDS = frozenset(
     }
 )
 _REPORT_PHASES = frozenset({"setup", "call", "teardown"})
-_RECEIPT_VALUE_NAMES = (
-    "AGENT_LOOP_STATE_HOME",
-    "AGENT_LOOP_CODEX_CREDENTIAL_ID",
-    "AGENT_LOOP_CLAUDE_CREDENTIAL_ID",
-    "AGENT_LOOP_CODEX_MODEL",
-    "AGENT_LOOP_CODEX_EFFORT",
-    "AGENT_LOOP_CLAUDE_MODEL",
-    "AGENT_LOOP_CLAUDE_EFFORT",
-    "AGENT_LOOP_CODEX_INSTALL_ROOT",
-    "AGENT_LOOP_CODEX_INSTALL_RELATIVE",
-    "AGENT_LOOP_CLAUDE_INSTALL_ROOT",
-    "AGENT_LOOP_CLAUDE_INSTALL_RELATIVE",
-    "AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE",
-    "AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID",
-)
 
 _OBSERVED_VALUES: dict[str, str] = {}
 
@@ -207,9 +191,9 @@ def reset_live_gate_session_state() -> None:
 def launched_bwrap_argv(command: tuple[str, ...]) -> tuple[str, ...]:
     """Extract the descriptor-binding launcher's reviewed Bubblewrap argv."""
 
-    if command[:4] != ("/usr/bin/python3", "-I", "-B", "-c") or len(command) != 6:
+    if command[:5] != ("/usr/bin/python3", "-I", "-B", "-S", "-c") or len(command) != 7:
         raise ValueError("sandbox service did not use the reviewed mount launcher")
-    payload = json.loads(command[5])
+    payload = json.loads(command[6])
     if not isinstance(payload, dict) or set(payload) != {"argv", "bindings"}:
         raise ValueError("sandbox mount-launch payload is malformed")
     argv = payload["argv"]
@@ -397,77 +381,6 @@ class LiveGateReportLedger:
         )
 
 
-def write_live_gate_receipt_from_observed_environment() -> Path:
-    """Re-probe, re-hash, and bind only selectors consumed by the passing gates."""
-
-    missing = sorted(set(_RECEIPT_VALUE_NAMES) - _OBSERVED_VALUES.keys())
-    if missing:
-        raise LiveGateConfigurationError(
-            "the passing live gates did not consume every receipt-bound explicit selector"
-        )
-    for name in _RECEIPT_VALUE_NAMES:
-        _checked_value(name)
-    _checked_managed_claude_selectors()
-    before = {
-        "codex": inspect_live_install("codex"),
-        "claude": inspect_live_install("claude"),
-    }
-    boundary_before = inspect_live_managed_claude_boundary()
-    report = run_preflight(
-        codex_path=os.fspath(before["codex"].host_executable),
-        claude_path=os.fspath(before["claude"].host_executable),
-    )
-    after = {
-        "codex": inspect_live_install("codex"),
-        "claude": inspect_live_install("claude"),
-    }
-    boundary_after = inspect_live_managed_claude_boundary()
-    if before != after:
-        raise LiveGateConfigurationError(
-            "a reviewed live install changed while constructing its capability receipt"
-        )
-    if boundary_before != boundary_after:
-        raise LiveGateConfigurationError(
-            "the managed Claude boundary changed while constructing its receipt"
-        )
-    if (
-        report.codex.resolved_path != os.fspath(after["codex"].host_executable)
-        or report.claude.resolved_path != os.fspath(after["claude"].host_executable)
-    ):
-        raise LiveGateConfigurationError(
-            "preflight resolved a different executable than the reviewed live mounts"
-        )
-    binding = LiveCapabilityBinding.from_environment_report(
-        report,
-        codex_credential_id=_checked_identifier("AGENT_LOOP_CODEX_CREDENTIAL_ID"),
-        claude_credential_id=_checked_identifier("AGENT_LOOP_CLAUDE_CREDENTIAL_ID"),
-        author_model=_checked_value("AGENT_LOOP_CODEX_MODEL"),
-        author_effort=_checked_value("AGENT_LOOP_CODEX_EFFORT"),
-        critic_model=_checked_value("AGENT_LOOP_CLAUDE_MODEL"),
-        critic_effort=_checked_value("AGENT_LOOP_CLAUDE_EFFORT"),
-        managed_claude_boundary=ManagedClaudeBoundaryCapabilityBinding(
-            policy_path=boundary_after.policy_mount.source,
-            helper_path=boundary_after.helper_mount.source,
-            policy_sha256=boundary_after.policy_sha256,
-            helper_sha256=boundary_after.helper_sha256,
-            probe_protocol=boundary_after.protocol,
-            probe_id=boundary_after.probe_id,
-        ),
-        codex_install_closure_sha256=after["codex"].closure_sha256,
-        claude_install_closure_sha256=after["claude"].closure_sha256,
-        runtime_closure_sha256=installed_runtime_closure_sha256(),
-    )
-    receipt_path = _checked_directory("AGENT_LOOP_STATE_HOME") / (
-        CAPABILITY_RECEIPT_RELATIVE_PATH
-    )
-    write_successful_live_capability_receipt(
-        receipt_path,
-        binding,
-        successful_gates=REQUIRED_ACCEPTANCE_GATES,
-    )
-    return receipt_path
-
-
 class RecordingService:
     """Record strict supervisor requests/results while delegating to production systemd."""
 
@@ -498,6 +411,43 @@ class RecordingService:
             timeout_seconds=timeout_seconds,
             limits=limits,
         )
+        if result.process.stdout:
+            response = parse_response(result.process.stdout, request=request)
+            if isinstance(response, SandboxResult):
+                self.results.append(response)
+        return result
+
+
+class RecordingAuthorService:
+    """Record fixed-manager author requests/results while using the root broker."""
+
+    def __init__(self) -> None:
+        self._delegate = FixedAuthorServiceClient()
+        self.roles: list[str] = []
+        self.requests: list[SandboxRequest] = []
+        self.results: list[SandboxResult] = []
+        self.service_results: list[ServiceResult] = []
+
+    def run_author(
+        self,
+        *,
+        input_bytes: bytes,
+        mounts: Sequence[AuthorMountDescriptor],
+        workspace_bytes: int,
+        timeout_seconds: float,
+        limits: ServiceLimits,
+    ) -> ServiceResult:
+        request = parse_request(input_bytes)
+        self.roles.append("author")
+        self.requests.append(request)
+        result = self._delegate.run_author(
+            input_bytes=input_bytes,
+            mounts=mounts,
+            workspace_bytes=workspace_bytes,
+            timeout_seconds=timeout_seconds,
+            limits=limits,
+        )
+        self.service_results.append(result)
         if result.process.stdout:
             response = parse_response(result.process.stdout, request=request)
             if isinstance(response, SandboxResult):

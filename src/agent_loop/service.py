@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import IO, cast
 
 from .constants import (
     DEFAULT_LIMIT_FSIZE_BYTES,
@@ -241,15 +242,11 @@ def run_bounded_process(
                 timed_out = True
                 abort()
                 remaining = 0.1
-            events = (
-                selector.select(min(max(remaining, 0.0), 0.1))
-                if selector.get_map()
-                else ()
-            )
+            events = selector.select(min(max(remaining, 0.0), 0.1)) if selector.get_map() else ()
             if not events and not selector.get_map() and process.poll() is None:
                 time.sleep(min(max(remaining, 0.0), 0.05))
             for key, mask in events:
-                stream = key.fileobj
+                stream = cast(IO[bytes], key.fileobj)
                 if key.data == "stdin" and mask & selectors.EVENT_WRITE:
                     try:
                         written = os.write(
@@ -294,8 +291,9 @@ def run_bounded_process(
                 key.data == "stdin" for key in selector.get_map().values()
             ):
                 for key in list(selector.get_map().values()):
-                    selector.unregister(key.fileobj)
-                    key.fileobj.close()
+                    registered_stream = cast(IO[bytes], key.fileobj)
+                    selector.unregister(registered_stream)
+                    registered_stream.close()
     except BaseException as error:
         if process is None:
             raise
@@ -311,10 +309,10 @@ def run_bounded_process(
             except BaseException as cleanup_error:
                 cleanup_errors.append(cleanup_error)
         if process is not None:
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None and not stream.closed:
+            for process_stream in (process.stdin, process.stdout, process.stderr):
+                if process_stream is not None and not process_stream.closed:
                     try:
-                        stream.close()
+                        process_stream.close()
                     except BaseException as cleanup_error:
                         cleanup_errors.append(cleanup_error)
 
@@ -340,9 +338,7 @@ def run_bounded_process(
             else:
                 cleanup_errors.append(reap_error)
             returncode = (
-                process.returncode
-                if isinstance(process.returncode, int)
-                else -int(signal.SIGKILL)
+                process.returncode if isinstance(process.returncode, int) else -int(signal.SIGKILL)
             )
     result = BoundedProcessResult(
         returncode=returncode,
@@ -355,10 +351,10 @@ def run_bounded_process(
     )
     if primary_error is None and cleanup_errors:
         primary_error = cleanup_errors.pop(0)
-    for cleanup_error in cleanup_errors:
+    for cleanup_failure in cleanup_errors:
         if primary_error is not None:
             primary_error.add_note(
-                f"post-spawn cleanup also failed: {type(cleanup_error).__name__}"
+                f"post-spawn cleanup also failed: {type(cleanup_failure).__name__}"
             )
     if isinstance(primary_error, KeyboardInterrupt):
         raise BoundedProcessInterrupted(result)
@@ -450,7 +446,7 @@ def _systemd_timespan_usec(value: str) -> int | None:
                 return None
             total += Decimal(match.group(1)) * _TIMESPAN_MULTIPLIER[match.group(2)]
             position = match.end()
-    except (InvalidOperation, OverflowError):
+    except InvalidOperation, OverflowError:
         return None
     if position == 0 or value[position:].strip() or total != total.to_integral_value():
         return None
@@ -599,14 +595,13 @@ class TransientServiceRunner:
                 except Exception as exc:
                     cleanup_error = fail(
                         StopReason.SERVICE_LIFECYCLE_MISMATCH,
-                        "transient service unit cleanup command failed: "
-                        f"{type(exc).__name__}",
+                        f"transient service unit cleanup command failed: {type(exc).__name__}",
                     )
 
                 if control_group is None:
                     try:
                         final_properties = _read_properties(unit_name)
-                    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+                    except OSError, subprocess.SubprocessError, UnicodeDecodeError:
                         final_properties = {}
                     control_group = final_properties.get("ControlGroup") or None
 

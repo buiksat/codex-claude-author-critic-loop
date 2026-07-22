@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-loop"
-version = "1.0.0"
+version = "1.1.0"
 description = "Containment-first bounded Codex author / Claude critic loop"
 readme = "README.md"
 requires-python = "==3.14.4"
@@ -21,8 +21,20 @@ classifiers = [
 ]
 dependencies = []
 
+[dependency-groups]
+quality = [
+  "hypothesis==6.158.0",
+  "jsonschema==4.19.2",
+  "mypy==2.3.0",
+  "pytest==9.0.2",
+  "pytest-cov==7.1.0",
+  "ruff==0.15.22",
+  "types-jsonschema==4.19.0.4",
+]
+
 [project.scripts]
 agent-loop = "agent_loop.cli:main"
+agent-loop-author-broker = "agent_loop.author_service:broker_main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -33,6 +45,7 @@ include-package-data = true
 "share/agent-loop/docs" = ["docs/IMPLEMENTATION_STATUS.md"]
 "share/agent-loop/schemas" = ["schemas/*.json"]
 "share/agent-loop/support/managed-claude-boundary" = ["support/managed-claude-boundary/*"]
+"share/agent-loop/support/author-service" = ["support/author-service/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -58,19 +71,32 @@ ignore = ["S101"]
 # These modules intentionally launch fixed, shell-free argv under the reviewed containment and
 # lifecycle boundaries. The named tests exercise those same subprocess boundaries.
 [tool.ruff.lint.per-file-ignores]
-"src/agent_loop/sandbox_init.py" = ["S404", "S603"]
+"src/agent_loop/provenance.py" = ["S103"] # reviewed closure modes are intentionally 0444/0555
+"src/agent_loop/author_service.py" = ["S108", "S110", "S404", "S603"] # fixed root-manager argv and best-effort exact-unit cleanup
+"src/agent_loop/runtime_adapters.py" = ["S108"] # /tmp is an isolated in-sandbox tmpfs
+"src/agent_loop/sandbox_init.py" = ["S110", "S404", "S603"] # best-effort ptrace rollback preserves the original fatal error
+"src/agent_loop/sandbox.py" = ["S108"] # /tmp is created inside the Bubblewrap namespace
 "src/agent_loop/service.py" = ["S404", "S603"]
+"src/agent_loop/validation.py" = ["S105"] # pass/fail transition enum names are not credentials
 "tests/host/test_limits.py" = ["S404", "S603"]
 "tests/host/test_network_boundary.py" = ["S404", "S603"]
 "tests/host/test_process_isolation.py" = ["S404", "S603"]
 "tests/host/test_sandbox.py" = ["S404", "S603"]
-"tests/integration/test_runtime_adapters.py" = ["S404", "S603"]
-"tests/integration/test_sandbox_init.py" = ["S404", "S603"]
-"tests/unit/test_sandbox.py" = ["S404"]
+"tests/integration/test_codex_client.py" = ["S105"] # dummy secret canaries exercise redaction
+"tests/integration/test_credentials.py" = ["S105"] # synthetic credentials only
+"tests/integration/test_runtime_adapters.py" = ["S105", "S404", "S603"] # synthetic credentials only
+"tests/integration/test_sandbox_init.py" = ["S105", "S404", "S603"] # synthetic credential rejection case
+"tests/unit/test_capabilities.py" = ["S108"] # deliberately malformed path fixtures
+"tests/unit/test_claude_managed_policy.py" = ["S105", "S108"] # synthetic secret and sandbox-path fixtures
+"tests/unit/test_config.py" = ["S108"] # deliberately rejected absolute-path fixture
+"tests/unit/test_sandbox.py" = ["S108", "S404"] # synthetic mount-policy paths
+"tests/unit/test_workflow.py" = ["S105"] # synthetic credential generation
 
 [tool.mypy]
 python_version = "3.14"
 strict = true
+explicit_package_bases = true
+mypy_path = "src"
 files = ["src", "tests"]
 warn_unreachable = true
 show_error_codes = true

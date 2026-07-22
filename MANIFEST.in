@@ -1,6 +1,8 @@
 include PLAN.md
 include README.md
+include LICENSE
 include pyproject.toml
 include docs/IMPLEMENTATION_STATUS.md
 recursive-include schemas *.json
 recursive-include support/managed-claude-boundary *
+recursive-include support/author-service *

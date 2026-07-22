@@ -41,8 +41,22 @@ _API_REQUEST_DETAIL_FIELDS = frozenset(
     {"model", "thinking", "output_config", "temperature", "betas", "anthropic_beta"}
 )
 _MAX_API_REQUEST_DETAIL_BYTES = 128 * 1_024
-_MAX_API_REQUEST_DETAILS = (CLAUDE_API_RETRIES + 1) * (
-    CLAUDE_STRUCTURED_OUTPUT_RETRIES + 1
+_MAX_API_REQUEST_DETAILS = (CLAUDE_API_RETRIES + 1) * (CLAUDE_STRUCTURED_OUTPUT_RETRIES + 1)
+_CLAUDE_REAUTHENTICATION_RESULTS = frozenset(
+    {
+        "Not logged in \u00b7 Please run /login",
+        "OAuth token revoked \u00b7 Please run /login",
+        "Login expired \u00b7 Please run /login",
+        "Failed to authenticate: OAuth session expired and could not be refreshed",
+    }
+)
+CLAUDE_REAUTHENTICATION_FAILURE_DETAIL = (
+    "Claude vendor session ended; run `claude auth login` once, then rerun. "
+    "No `agent-loop auth` command is required."
+)
+CLAUDE_REAUTHENTICATION_NEXT_ACTION = (
+    "Run `claude auth login` once, then rerun this command. "
+    "No `agent-loop auth` command is required."
 )
 
 
@@ -127,10 +141,10 @@ def complete_claude_environment(parent: Mapping[str, str]) -> dict[str, str]:
         "LANG",
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_CODE_TMPDIR",
-        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
     }
-    if set(parent) != required:
+    allowed = required | {"CLAUDE_CODE_OAUTH_TOKEN"}
+    if not required <= set(parent) or not set(parent) <= allowed:
         raise ValueError("Claude parent environment is not the dedicated allowlist")
     if parent["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] != "1":
         raise ValueError("Claude subprocess credential scrubbing must be enabled")
@@ -174,6 +188,8 @@ def _classify_envelope_failure(data: bytes) -> None:
     envelope = parse_json_object(data)
     subtype = envelope.get("subtype")
     stop_reason = envelope.get("stop_reason")
+    api_error_status = envelope.get("api_error_status")
+    result_text = envelope.get("result")
     if subtype in {"error_max_turns", "max_turns"} or stop_reason == "max_turns":
         raise fail(StopReason.CRITIC_MAX_TURNS_EXHAUSTED, "Claude exhausted its max-turn budget")
     if subtype in {
@@ -183,6 +199,29 @@ def _classify_envelope_failure(data: bytes) -> None:
         raise fail(
             StopReason.STRUCTURED_OUTPUT_RETRIES,
             "Claude exhausted its structured-output retry budget",
+        )
+    # Pinned Claude 2.1.215 emits authentication failures as unsuccessful
+    # ``result`` envelopes, rather than as ``type=error``.  Require the complete
+    # observed control-plane framing before interpreting either its HTTP status
+    # or one of the exact local-session messages.  Never forward the untrusted
+    # result text into the typed diagnostic.
+    if (
+        envelope.get("type") == "result"
+        and subtype == "success"
+        and envelope.get("is_error") is True
+        and envelope.get("terminal_reason") == "api_error"
+        and (
+            (type(api_error_status) is int and api_error_status == 401)
+            or (
+                api_error_status is None
+                and isinstance(result_text, str)
+                and result_text in _CLAUDE_REAUTHENTICATION_RESULTS
+            )
+        )
+    ):
+        raise fail(
+            StopReason.CREDENTIAL_REFRESH_FAILURE,
+            CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
         )
     if envelope.get("is_error") is True or envelope.get("type") == "error":
         raise fail(StopReason.CRITIC_PROCESS_FAILURE, "Claude returned an error envelope")

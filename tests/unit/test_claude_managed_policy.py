@@ -12,7 +12,6 @@ import agent_loop.claude_managed_policy as managed_policy
 from agent_loop.provenance import closure_sha256
 from agent_loop.service import BoundedProcessResult, run_bounded_process
 
-
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _SUPPORT_ROOT = _REPOSITORY_ROOT / "support" / "managed-claude-boundary"
 _POLICY_TEMPLATE = _SUPPORT_ROOT / "managed-settings.json"
@@ -189,11 +188,7 @@ def test_installer_offline_check_resolves_source_and_wheel_runtime_layouts(
     else:
         install_prefix = tmp_path / "pipx-venv"
         support_root = (
-            install_prefix
-            / "share"
-            / "agent-loop"
-            / "support"
-            / "managed-claude-boundary"
+            install_prefix / "share" / "agent-loop" / "support" / "managed-claude-boundary"
         )
         runtime_root = install_prefix / "lib" / "python3.14" / "site-packages"
 
@@ -236,6 +231,33 @@ def test_boundary_constants_pin_the_admin_paths_and_attestation() -> None:
         "AGENT_LOOP_MANAGED_CLAUDE_BOUNDARY_OK:reviewed-managed-boundary-v1:"
         "credential_absent:scrub=1"
     )
+    assert managed_policy.MANAGED_CLAUDE_BOUNDARY_REDACTED_MARKER == (
+        "AGENT_LOOP_MANAGED_CLAUDE_BOUNDARY_OK:reviewed-managed-boundary-v1:"
+        "credential_absent:[REDACTED]"
+    )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        managed_policy.MANAGED_CLAUDE_BOUNDARY_MARKER,
+        managed_policy.MANAGED_CLAUDE_BOUNDARY_REDACTED_MARKER,
+    ],
+)
+def test_boundary_attestation_accepts_only_exact_pinned_renderings(marker: str) -> None:
+    encoded = marker.encode("ascii")
+    assert managed_policy.managed_claude_boundary_attested(b"prefix\n" + encoded + b"\nsuffix")
+    assert not managed_policy.managed_claude_boundary_attested(encoded[:-1])
+    assert not managed_policy.managed_claude_boundary_attested(
+        encoded.replace(b"[REDACTED]", b"[redacted]").replace(b"scrub=1", b"scrub=true")
+    )
+
+
+def test_boundary_attestation_rejects_non_bytes() -> None:
+    with pytest.raises(TypeError, match="must be bytes"):
+        managed_policy.managed_claude_boundary_attested(
+            managed_policy.MANAGED_CLAUDE_BOUNDARY_MARKER  # type: ignore[arg-type]
+        )
 
 
 def test_helper_accepts_only_the_reviewed_session_start_shape(
@@ -378,7 +400,7 @@ def _simulate_admin_fixture(
             values[0] = stat.S_IFDIR | 0o755
         return os.stat_result(values)
 
-    monkeypatch.setattr(managed_policy.os, "lstat", simulated_admin_lstat)
+    monkeypatch.setattr(os, "lstat", simulated_admin_lstat)
     return policy_root, policy_file, helper
 
 
@@ -484,7 +506,7 @@ def test_inspector_rejects_unreviewed_shape_content_or_metadata(
     elif mutation == "helper-mode":
         helper.chmod(0o700)
     elif mutation == "helper-owner":
-        simulated_admin_lstat = managed_policy.os.lstat
+        simulated_admin_lstat = os.lstat
 
         def foreign_helper_lstat(
             path: str | os.PathLike[str],
@@ -498,7 +520,7 @@ def test_inspector_rejects_unreviewed_shape_content_or_metadata(
             values[4] = os.geteuid() + 1
             return os.stat_result(values)
 
-        monkeypatch.setattr(managed_policy.os, "lstat", foreign_helper_lstat)
+        monkeypatch.setattr(os, "lstat", foreign_helper_lstat)
     elif mutation == "helper-hardlink":
         outside = helper.parent.parent / "helper-hardlink"
         os.link(helper, outside)
@@ -521,7 +543,7 @@ def test_inspector_rejects_unreviewed_shape_content_or_metadata(
                 return ["user.unreviewed"]
             return real_listxattr(path, follow_symlinks=follow_symlinks)
 
-        monkeypatch.setattr(managed_policy.os, "listxattr", synthetic_xattr)
+        monkeypatch.setattr(os, "listxattr", synthetic_xattr)
     elif mutation == "helper-empty":
         helper.chmod(0o755)
         helper.write_bytes(b"")

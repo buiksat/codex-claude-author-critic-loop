@@ -59,9 +59,9 @@ def _fake_bwrap_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
         st_ino=actual.st_ino,
     )
     original_open = os.open
-    monkeypatch.setattr(sandbox_module.os, "lstat", lambda _path: info)
+    monkeypatch.setattr(os, "lstat", lambda _path: info)
     monkeypatch.setattr(
-        sandbox_module.os,
+        os,
         "open",
         lambda _path, flags: original_open(executable, flags),
     )
@@ -95,7 +95,7 @@ def test_011_bubblewrap_probe_rejects_setuid_unexpected_hash_and_vulnerable_revi
         st_uid=0,
         st_gid=0,
     )
-    monkeypatch.setattr(sandbox_module.os, "lstat", lambda _path: unsafe)
+    monkeypatch.setattr(os, "lstat", lambda _path: unsafe)
     with pytest.raises(AgentLoopError) as setuid:
         sandbox_module.probe_bubblewrap_package()
     assert setuid.value.reason is StopReason.BWRAP_PACKAGE_OR_MODE_UNSAFE

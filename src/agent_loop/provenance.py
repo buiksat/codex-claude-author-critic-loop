@@ -7,6 +7,7 @@ import hashlib
 import os
 import pwd
 import stat
+import tempfile
 from pathlib import Path
 
 MAX_REVIEWED_CLOSURE_FILES = 1_024
@@ -21,13 +22,10 @@ def _private_primary_group(group_id: int) -> bool:
     except KeyError:
         return False
     accounts = {account.pw_name: account for account in pwd.getpwall()}
-    member_names = {
-        account.pw_name for account in accounts.values() if account.pw_gid == group_id
-    }
+    member_names = {account.pw_name for account in accounts.values() if account.pw_gid == group_id}
     member_names.update(group.gr_mem)
     return bool(member_names) and all(
-        name in accounts and accounts[name].pw_uid == os.geteuid()
-        for name in member_names
+        name in accounts and accounts[name].pw_uid == os.geteuid() for name in member_names
     )
 
 
@@ -141,6 +139,8 @@ def _closure_sha256_fd(
     max_files: int,
     max_bytes: int,
     python_sources_only: bool,
+    allowed_owner_uids: frozenset[int] | None = None,
+    observed_limits: list[int] | None = None,
 ) -> str:
     retained: list[tuple[int, os.stat_result]] = []
     records: list[tuple[bytes, bytes, int, int, bytes]] = []
@@ -152,16 +152,29 @@ def _closure_sha256_fd(
         if python_sources_only
         else b"agent-loop/reviewed-install-closure/v1"
     )
+
+    def safe_mode(info: os.stat_result) -> bool:
+        if allowed_owner_uids is None:
+            return safe_owned_mode(info)
+        mode = stat.S_IMODE(info.st_mode)
+        return bool(
+            info.st_uid in allowed_owner_uids
+            and not mode & 0o022
+            and not mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+        )
+
     if stat.S_ISREG(root_info.st_mode):
         if python_sources_only:
             raise ValueError("Python source closure root must be a directory")
-        if not safe_owned_mode(root_info) or root_info.st_nlink != 1:
+        if not safe_mode(root_info) or root_info.st_nlink != 1:
             raise ValueError("reviewed closure root is unsafe")
         reject_extended_metadata_fd(root_fd)
         if root_info.st_size > max_bytes:
             raise ValueError("reviewed closure byte count exceeded")
         payload_digest = _hash_open_file(root_fd, root_info)
         retained.append((os.dup(root_fd), root_info))
+        observed_entries = 1
+        total_bytes = root_info.st_size
         records.append(
             (
                 b"F",
@@ -177,14 +190,12 @@ def _closure_sha256_fd(
             while stack:
                 relative, directory_fd = stack.pop()
                 directory_info = os.fstat(directory_fd)
-                if not safe_owned_mode(directory_info):
+                if not safe_mode(directory_info):
                     raise ValueError("unsafe reviewed closure directory")
                 reject_extended_metadata_fd(directory_fd)
                 retained.append((directory_fd, directory_info))
                 cache_directory = bool(
-                    python_sources_only
-                    and relative
-                    and b"__pycache__" in relative.split(b"/")
+                    python_sources_only and relative and b"__pycache__" in relative.split(b"/")
                 )
                 if not cache_directory:
                     records.append(
@@ -208,9 +219,7 @@ def _closure_sha256_fd(
                         )
                         try:
                             if not _same_metadata(metadata, os.fstat(child_fd)):
-                                raise ValueError(
-                                    "reviewed closure directory identity changed"
-                                )
+                                raise ValueError("reviewed closure directory identity changed")
                         except BaseException:
                             os.close(child_fd)
                             raise
@@ -227,9 +236,7 @@ def _closure_sha256_fd(
                     if observed_entries > max_files:
                         raise ValueError("reviewed closure entry count exceeded")
                     if not stat.S_ISREG(metadata.st_mode):
-                        raise ValueError(
-                            "reviewed closure contains an unsafe non-regular file"
-                        )
+                        raise ValueError("reviewed closure contains an unsafe non-regular file")
                     file_fd = os.open(
                         name,
                         os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -239,18 +246,14 @@ def _closure_sha256_fd(
                         opened = os.fstat(file_fd)
                         if not _same_metadata(metadata, opened):
                             raise ValueError("reviewed closure file identity changed")
-                        if not safe_owned_mode(opened) or opened.st_nlink != 1:
-                            raise ValueError(
-                                "reviewed closure contains an unsafe non-regular file"
-                            )
+                        if not safe_mode(opened) or opened.st_nlink != 1:
+                            raise ValueError("reviewed closure contains an unsafe non-regular file")
                         reject_extended_metadata_fd(file_fd)
                         total_bytes += opened.st_size
                         if total_bytes > max_bytes:
                             raise ValueError("reviewed closure byte count exceeded")
                         if python_sources_only and not path.endswith(b".py"):
-                            raise ValueError(
-                                "Python source closure contains an unexpected payload"
-                            )
+                            raise ValueError("Python source closure contains an unexpected payload")
                         payload_digest = _hash_open_file(file_fd, opened)
                     except BaseException:
                         os.close(file_fd)
@@ -287,6 +290,8 @@ def _closure_sha256_fd(
             digest.update(mode.to_bytes(4, "big"))
             digest.update(size.to_bytes(8, "big"))
             digest.update(payload_digest)
+        if observed_limits is not None:
+            observed_limits[:] = [observed_entries, total_bytes]
         return digest.hexdigest()
     finally:
         for descriptor, _ in retained:
@@ -333,8 +338,10 @@ def open_verified_closure(
 ) -> int:
     """Return a retained root descriptor for the exact verified closure."""
 
-    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64 or any(
-        character not in "0123456789abcdef" for character in expected_sha256
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
     ):
         raise ValueError("expected reviewed closure digest is invalid")
     descriptor = _open_reviewed_root(root)
@@ -420,6 +427,10 @@ def _copy_closure_from_fd(
     source_name: bytes,
     *,
     python_sources_only: bool,
+    max_entries: int = MAX_REVIEWED_CLOSURE_FILES,
+    max_bytes: int = MAX_REVIEWED_CLOSURE_BYTES,
+    expected_entries: int | None = None,
+    expected_bytes: int | None = None,
 ) -> Path:
     root_info = os.fstat(source_fd)
     destination = destination_parent / os.fsdecode(source_name)
@@ -427,9 +438,18 @@ def _copy_closure_from_fd(
         destination_parent,
         os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
     )
+    copied_entries = 0
+    copied_bytes = 0
     try:
         if stat.S_ISREG(root_info.st_mode):
+            if root_info.st_size > max_bytes:
+                raise ValueError("reviewed closure snapshot byte count exceeded")
             _copy_regular_file(source_fd, parent_fd, source_name, root_info)
+            if expected_entries not in {None, 1} or expected_bytes not in {
+                None,
+                root_info.st_size,
+            }:
+                raise ValueError("reviewed closure changed after its witness")
             return destination
         if not stat.S_ISDIR(root_info.st_mode):
             raise ValueError("reviewed closure snapshot root has an unsafe type")
@@ -463,6 +483,9 @@ def _copy_closure_from_fd(
                     if stat.S_ISDIR(metadata.st_mode):
                         if python_sources_only and name == b"__pycache__":
                             continue
+                        copied_entries += 1
+                        if copied_entries > max_entries:
+                            raise ValueError("reviewed closure snapshot entry count exceeded")
                         os.mkdir(name, 0o700, dir_fd=current_destination_fd)
                         next_source_fd = os.open(
                             name,
@@ -480,21 +503,23 @@ def _copy_closure_from_fd(
                             raise
                         try:
                             if not _same_metadata(metadata, os.fstat(next_source_fd)):
-                                raise ValueError(
-                                    "reviewed closure changed while snapshotting"
-                                )
+                                raise ValueError("reviewed closure changed while snapshotting")
                         except BaseException:
                             os.close(next_source_fd)
                             os.close(next_destination_fd)
                             raise
-                        stack.append(
-                            (path, next_source_fd, next_destination_fd, metadata)
-                        )
+                        stack.append((path, next_source_fd, next_destination_fd, metadata))
                         continue
                     if not stat.S_ISREG(metadata.st_mode):
                         raise ValueError("reviewed closure contains an unsafe non-regular file")
+                    copied_entries += 1
+                    if copied_entries > max_entries:
+                        raise ValueError("reviewed closure snapshot entry count exceeded")
                     if python_sources_only and not path.endswith(b".py"):
                         raise ValueError("Python source snapshot contains an unexpected payload")
+                    copied_bytes += metadata.st_size
+                    if copied_bytes > max_bytes:
+                        raise ValueError("reviewed closure snapshot byte count exceeded")
                     input_fd = os.open(
                         name,
                         os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -527,6 +552,8 @@ def _copy_closure_from_fd(
             os.close(pending_source)
             os.close(pending_destination)
         raise
+    if expected_entries not in {None, copied_entries} or expected_bytes not in {None, copied_bytes}:
+        raise ValueError("reviewed closure changed after its witness")
     return destination
 
 
@@ -545,8 +572,8 @@ def _normalize_snapshot_modes(root: Path) -> None:
             child = directory_path / name
             info = os.stat(child, follow_symlinks=False)
             os.chmod(child, 0o555 if info.st_mode & 0o111 else 0o444)
-    for directory in reversed(gathered):
-        os.chmod(directory, 0o555)
+    for frozen_directory in reversed(gathered):
+        os.chmod(frozen_directory, 0o555)
 
 
 def snapshot_reviewed_closure(
@@ -584,19 +611,136 @@ def snapshot_reviewed_closure(
     finally:
         os.close(source_fd)
     copied = (
-        python_source_closure_sha256(snapshot)
-        if python_sources_only
-        else closure_sha256(snapshot)
+        python_source_closure_sha256(snapshot) if python_sources_only else closure_sha256(snapshot)
     )
     if copied != expected_sha256:
         raise ValueError("reviewed closure changed during snapshot")
     _normalize_snapshot_modes(snapshot)
     mounted = (
-        python_source_closure_sha256(snapshot)
-        if python_sources_only
-        else closure_sha256(snapshot)
+        python_source_closure_sha256(snapshot) if python_sources_only else closure_sha256(snapshot)
     )
     return snapshot, mounted
+
+
+def normalized_closure_sha256(
+    source: Path,
+    *,
+    python_sources_only: bool = False,
+) -> str:
+    """Return the exact digest produced by the immutable mount normalization."""
+
+    expected = (
+        python_source_closure_sha256(source) if python_sources_only else closure_sha256(source)
+    )
+    with tempfile.TemporaryDirectory(prefix="agent-loop-normalized-closure-") as temporary:
+        parent = Path(temporary)
+        _snapshot, mounted = snapshot_reviewed_closure(
+            source,
+            parent,
+            expected,
+            python_sources_only=python_sources_only,
+        )
+    return mounted
+
+
+def descriptor_closure_witness(
+    descriptor: int,
+    *,
+    root_name: bytes,
+    allowed_owner_uid: int,
+    python_sources_only: bool = False,
+    max_files: int = MAX_REVIEWED_CLOSURE_FILES,
+    max_bytes: int = MAX_REVIEWED_CLOSURE_BYTES,
+) -> tuple[str, int, int]:
+    """Hash an already-open peer closure under the broker's stricter owner policy."""
+
+    if (
+        not isinstance(descriptor, int)
+        or descriptor < 0
+        or not isinstance(root_name, bytes)
+        or not 1 <= len(root_name) <= 255
+        or b"/" in root_name
+        or b"\0" in root_name
+        or not isinstance(allowed_owner_uid, int)
+        or isinstance(allowed_owner_uid, bool)
+        or allowed_owner_uid <= 0
+        or not isinstance(max_files, int)
+        or isinstance(max_files, bool)
+        or not 1 <= max_files <= MAX_REVIEWED_CLOSURE_FILES
+        or not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or not 1 <= max_bytes <= MAX_REVIEWED_CLOSURE_BYTES
+    ):
+        raise ValueError("descriptor closure authority is malformed")
+    retained = os.dup(descriptor)
+    limits: list[int] = []
+    try:
+        digest = _closure_sha256_fd(
+            retained,
+            root_name=root_name,
+            max_files=max_files,
+            max_bytes=max_bytes,
+            python_sources_only=python_sources_only,
+            allowed_owner_uids=frozenset({0, allowed_owner_uid}),
+            observed_limits=limits,
+        )
+    finally:
+        os.close(retained)
+    if len(limits) != 2:
+        raise AssertionError("descriptor closure witness omitted its limits")
+    return digest, limits[0], limits[1]
+
+
+def snapshot_descriptor_closure(
+    descriptor: int,
+    destination_parent: Path,
+    expected_sha256: str,
+    *,
+    root_name: bytes,
+    allowed_owner_uid: int,
+    python_sources_only: bool = False,
+    max_files: int = MAX_REVIEWED_CLOSURE_FILES,
+    max_bytes: int = MAX_REVIEWED_CLOSURE_BYTES,
+) -> tuple[Path, str, int, int]:
+    """Copy one peer closure into a normalized broker-owned immutable snapshot."""
+
+    if (
+        len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+        or not destination_parent.is_absolute()
+        or not destination_parent.is_dir()
+    ):
+        raise ValueError("descriptor snapshot parameters are invalid")
+    observed, entries, total_bytes = descriptor_closure_witness(
+        descriptor,
+        root_name=root_name,
+        allowed_owner_uid=allowed_owner_uid,
+        python_sources_only=python_sources_only,
+        max_files=max_files,
+        max_bytes=max_bytes,
+    )
+    if observed != expected_sha256:
+        raise ValueError("descriptor closure differs from its declared witness")
+    snapshot = _copy_closure_from_fd(
+        descriptor,
+        destination_parent,
+        root_name,
+        python_sources_only=python_sources_only,
+        max_entries=max_files,
+        max_bytes=max_bytes,
+        expected_entries=entries,
+        expected_bytes=total_bytes,
+    )
+    copied = (
+        python_source_closure_sha256(snapshot) if python_sources_only else closure_sha256(snapshot)
+    )
+    if copied != expected_sha256:
+        raise ValueError("descriptor closure changed during broker snapshot")
+    _normalize_snapshot_modes(snapshot)
+    mounted = (
+        python_source_closure_sha256(snapshot) if python_sources_only else closure_sha256(snapshot)
+    )
+    return snapshot, mounted, entries, total_bytes
 
 
 def installed_runtime_closure_sha256() -> str:

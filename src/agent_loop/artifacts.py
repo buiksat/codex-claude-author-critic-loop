@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-from contextlib import contextmanager
 import errno
 import fcntl
 import hashlib
@@ -12,9 +11,11 @@ import json
 import os
 import stat
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import Iterator, Self
+from typing import Self
 
 from .constants import PRIVATE_FILE_MODE, Limits
 from .declassify import KnownSecret, raw_log_contains_known_secret
@@ -51,32 +52,44 @@ def _withholding_location(
     raw = os.fspath(root)
     if not isinstance(raw, (str, bytes)):
         raise TypeError("artifact root must be a filesystem path")
-    parent = os.path.dirname(raw)
-    basename = os.path.basename(raw)
-    if not basename:
-        raise ValueError("artifact root must have a final component")
-    directory_name: str | bytes = _WITHHOLDING_CONTROL_DIRECTORY
     if isinstance(raw, bytes):
-        directory_name = _WITHHOLDING_CONTROL_DIRECTORY.encode("ascii")
-    runs_name: str | bytes = b"runs" if isinstance(raw, bytes) else "runs"
-    if os.path.basename(parent) == runs_name:
-        control_name: str | bytes = b"control" if isinstance(raw, bytes) else "control"
-        latch_name: str | bytes = (
-            b"artifact-withholding" if isinstance(raw, bytes) else "artifact-withholding"
+        parent_bytes = os.path.dirname(raw)
+        if not os.path.basename(raw):
+            raise ValueError("artifact root must have a final component")
+        if os.path.basename(parent_bytes) == b"runs":
+            control_root_bytes = os.path.join(
+                os.path.dirname(parent_bytes), b"control", b"artifact-withholding"
+            )
+        else:
+            control_root_bytes = os.path.join(
+                parent_bytes, _WITHHOLDING_CONTROL_DIRECTORY.encode("ascii")
+            )
+        root_absolute_bytes = os.path.abspath(raw)
+        control_absolute_bytes = os.path.abspath(control_root_bytes)
+        if os.path.commonpath((root_absolute_bytes, control_absolute_bytes)) == root_absolute_bytes:
+            raise ValueError(
+                "artifact root must be structurally disjoint from its withholding control root"
+            )
+        marker = _WITHHOLDING_MARKER_PREFIX + hashlib.sha256(raw).hexdigest().encode("ascii")
+        return control_root_bytes, marker
+
+    parent_text = os.path.dirname(raw)
+    if not os.path.basename(raw):
+        raise ValueError("artifact root must have a final component")
+    if os.path.basename(parent_text) == "runs":
+        control_root_text = os.path.join(
+            os.path.dirname(parent_text), "control", "artifact-withholding"
         )
-        control_root = os.path.join(os.path.dirname(parent), control_name, latch_name)
     else:
-        control_root = os.path.join(parent, directory_name)
-    root_absolute = os.path.abspath(raw)
-    control_absolute = os.path.abspath(control_root)
-    if os.path.commonpath((root_absolute, control_absolute)) == root_absolute:
+        control_root_text = os.path.join(parent_text, _WITHHOLDING_CONTROL_DIRECTORY)
+    root_absolute_text = os.path.abspath(raw)
+    control_absolute_text = os.path.abspath(control_root_text)
+    if os.path.commonpath((root_absolute_text, control_absolute_text)) == root_absolute_text:
         raise ValueError(
             "artifact root must be structurally disjoint from its withholding control root"
         )
-    marker = _WITHHOLDING_MARKER_PREFIX + hashlib.sha256(
-        os.fsencode(raw)
-    ).hexdigest().encode("ascii")
-    return control_root, marker
+    marker = _WITHHOLDING_MARKER_PREFIX + hashlib.sha256(raw.encode()).hexdigest().encode("ascii")
+    return control_root_text, marker
 
 
 def _retained_bytes_contain_known_secret(
@@ -113,13 +126,13 @@ def _retained_bytes_contain_known_secret(
         documents: list[object] = []
         try:
             documents.append(json.loads(current))
-        except (UnicodeDecodeError, ValueError, RecursionError):
+        except UnicodeDecodeError, ValueError, RecursionError:
             for line in current.splitlines():
                 if not line:
                     continue
                 try:
                     documents.append(json.loads(line))
-                except (UnicodeDecodeError, ValueError, RecursionError):
+                except UnicodeDecodeError, ValueError, RecursionError:
                     continue
 
         stack = documents
@@ -160,8 +173,8 @@ class ArtifactStore:
         self,
         filesystem: ConfinedFilesystem,
         *,
-        withholding_control_root: str | bytes,
-        withholding_marker: bytes,
+        withholding_control_root: object,
+        withholding_marker: object,
     ) -> None:
         root_info = os.fstat(filesystem.fileno())
         if (
@@ -232,9 +245,7 @@ class ArtifactStore:
     @classmethod
     def from_filesystem(cls, filesystem: ConfinedFilesystem) -> Self:
         del filesystem
-        raise ValueError(
-            "path-bound artifact withholding identity is required; use create or open"
-        )
+        raise ValueError("path-bound artifact withholding identity is required; use create or open")
 
     @property
     def content_withheld_due_to_secret(self) -> bool:
@@ -372,8 +383,7 @@ class ArtifactStore:
             if primary is not None:
                 for cleanup_error in cleanup_errors:
                     primary.add_note(
-                        "retained filesystem cleanup also failed: "
-                        f"{type(cleanup_error).__name__}"
+                        f"retained filesystem cleanup also failed: {type(cleanup_error).__name__}"
                     )
             elif cleanup_errors:
                 raise cleanup_errors[0]
@@ -382,9 +392,7 @@ class ArtifactStore:
         root = self._withholding_control_root
         try:
             control = (
-                ConfinedFilesystem.create_private(root)
-                if create
-                else ConfinedFilesystem.open(root)
+                ConfinedFilesystem.create_private(root) if create else ConfinedFilesystem.open(root)
             )
         except (AgentLoopError, OSError) as exc:
             cause = exc.__cause__ if isinstance(exc, AgentLoopError) else exc
@@ -532,8 +540,6 @@ class ArtifactStore:
                     continue
                 if stat.S_ISLNK(info.st_mode):
                     target = os.readlink(name, dir_fd=directory_fd)
-                    if not isinstance(target, bytes):
-                        target = os.fsencode(target)
                     if path_sensitive or raw_log_contains_known_secret(target, secrets):
                         collision = True
                     continue
@@ -555,11 +561,11 @@ class ArtifactStore:
                 visit(root, b"")
             finally:
                 os.close(root)
-        except (AgentLoopError, OSError):
+        except AgentLoopError, OSError:
             self._secret_scrub_failed = True
             try:
                 self._withhold_all_content_unlocked()
-            except (AgentLoopError, OSError):
+            except AgentLoopError, OSError:
                 pass
             raise fail(
                 StopReason.CREDENTIAL_REFRESH_FAILURE,
@@ -626,14 +632,12 @@ class ArtifactStore:
                 self._persist_credential_withheld_marker()
             except BaseException as retry_error:
                 marker_error.add_note(
-                    "artifact withholding marker retry also failed: "
-                    f"{type(retry_error).__name__}"
+                    f"artifact withholding marker retry also failed: {type(retry_error).__name__}"
                 )
         if marker_error is not None:
             if erase_error is not None:
                 marker_error.add_note(
-                    "artifact evidence erasure also failed: "
-                    f"{type(erase_error).__name__}"
+                    f"artifact evidence erasure also failed: {type(erase_error).__name__}"
                 )
             raise marker_error
         if erase_error is not None:
@@ -643,9 +647,7 @@ class ArtifactStore:
         self._withholding_thread_lock.acquire()
         try:
             if self._withholding_lock_depth != 0:
-                raise ValueError(
-                    "artifact store cannot close during a retained-tree operation"
-                )
+                raise ValueError("artifact store cannot close during a retained-tree operation")
             descriptor = self._withholding_lock_fd
             self._withholding_lock_fd = None
             errors: list[BaseException] = []
@@ -662,8 +664,7 @@ class ArtifactStore:
                 primary = errors[0]
                 for secondary in errors[1:]:
                     primary.add_note(
-                        "artifact store cleanup also failed: "
-                        f"{type(secondary).__name__}"
+                        f"artifact store cleanup also failed: {type(secondary).__name__}"
                     )
                 raise primary
         finally:
@@ -717,13 +718,16 @@ class ArtifactStore:
 
         if self.content_withheld_due_to_secret:
             return
-        encoded = json.dumps(
-            value,
-            ensure_ascii=True,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("ascii") + b"\n"
+        encoded = (
+            json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            + b"\n"
+        )
         self.write_bytes(path, encoded)
 
     def read_bytes(self, path: str | bytes, *, max_bytes: int) -> bytes:
@@ -759,11 +763,7 @@ class ContentAddressedBlobStore:
         if not isinstance(artifacts, ArtifactStore):
             raise TypeError("artifacts must be an ArtifactStore")
         selected_max = Limits().max_file_bytes if max_blob_bytes is None else max_blob_bytes
-        if (
-            not isinstance(selected_max, int)
-            or isinstance(selected_max, bool)
-            or selected_max <= 0
-        ):
+        if not isinstance(selected_max, int) or isinstance(selected_max, bool) or selected_max <= 0:
             raise ValueError("max_blob_bytes must be a positive integer")
         self._artifacts = artifacts
         self._prefix = _artifact_path(prefix)

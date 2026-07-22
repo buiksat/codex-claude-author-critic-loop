@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import selectors
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,7 +23,7 @@ from agent_loop.service import BoundedProcessResult, ServiceLimits, ServiceResul
 
 def _fake_executable(path: Path, body: str) -> Path:
     path.write_text(f"#!/usr/bin/python3\n{body}", encoding="utf-8")
-    path.chmod(0o755)  # noqa: S103 - executable fixture must be launchable
+    path.chmod(0o755)
     return path
 
 
@@ -215,9 +217,9 @@ def _inject_post_spawn_setup_error(
     def record_termination(spawned: object) -> None:
         terminated.append(spawned)
 
-    monkeypatch.setattr(git_source.subprocess, "Popen", spawn)
-    monkeypatch.setattr(git_source.selectors, "DefaultSelector", create_selector)
-    monkeypatch.setattr(git_source.os, "set_blocking", fail_setup)
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(selectors, "DefaultSelector", create_selector)
+    monkeypatch.setattr(os, "set_blocking", fail_setup)
     monkeypatch.setattr(git_source, "_kill_process_group", record_termination)
     return process, selector, terminated
 

@@ -3,14 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-import subprocess  # noqa: S404 - tests invoke only the pinned Git binary
-from collections.abc import Sequence
+import subprocess
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import agent_loop.git_source as git_source
+from agent_loop.constants import DEFAULT_MAX_AGENT_OUTPUT_BYTES
 from agent_loop.errors import AgentLoopError, StopReason
 from agent_loop.git_source import (
     GitCommandRunner,
@@ -66,8 +66,7 @@ def _git(repository: Path, *arguments: str, input_data: bytes | None = None) -> 
         cwd=repository,
         env=_setup_environment(repository.parent / "setup-home"),
         input=input_data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if result.returncode != 0:
@@ -135,7 +134,7 @@ def test_005_006_040_private_git_derived_manifest_and_source_immutability(
     (repository / "binary.bin").write_bytes(b"\x00binary\xff\n")
     executable = repository / "run.sh"
     executable.write_bytes(b"#!/bin/sh\nexit 0\n")
-    executable.chmod(0o755)  # noqa: S103 - executable mode is the behavior under test
+    executable.chmod(0o755)
     newline_path = os.fsencode(repository) + b"/line\nname.txt"
     descriptor = os.open(newline_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -207,7 +206,7 @@ def test_037_038_hostile_git_environment_and_config_never_execute(
         f"#!/bin/sh\nprintf invoked > {os.fspath(marker)!r}\n",
         encoding="utf-8",
     )
-    hostile.chmod(0o755)  # noqa: S103 - hostile executable fixture must be launchable
+    hostile.chmod(0o755)
     _git(repository, "config", "core.fsmonitor", os.fspath(hostile))
     _git(repository, "config", "core.hooksPath", os.fspath(tmp_path / "hooks"))
     _git(repository, "config", "diff.external", os.fspath(hostile))
@@ -338,17 +337,26 @@ def test_040_repository_root_swap_cannot_redirect_bound_git_reads(tmp_path: Path
     class SwappingRunner(GitCommandRunner):
         def run(
             self,
-            selected: Path,
+            repository: Path,
             arguments: Sequence[str],
-            **kwargs: Any,
+            *,
+            stdin_data: bytes = b"",
+            max_stdout_bytes: int = DEFAULT_MAX_AGENT_OUTPUT_BYTES,
+            allowed_returncodes: Iterable[int] = (0,),
         ) -> GitProcessResult:
-            selected.rename(parked)
-            replacement.rename(selected)
+            repository.rename(parked)
+            replacement.rename(repository)
             try:
-                return super().run(selected, arguments, **kwargs)
+                return super().run(
+                    repository,
+                    arguments,
+                    stdin_data=stdin_data,
+                    max_stdout_bytes=max_stdout_bytes,
+                    allowed_returncodes=allowed_returncodes,
+                )
             finally:
-                selected.rename(replacement)
-                parked.rename(selected)
+                repository.rename(replacement)
+                parked.rename(repository)
 
     snapshot = extract_committed_head(
         repository,
@@ -394,11 +402,20 @@ def test_040_persistent_repository_root_swap_is_out_of_band(tmp_path: Path) -> N
 
         def run(
             self,
-            selected: Path,
+            repository: Path,
             arguments: Sequence[str],
-            **kwargs: Any,
+            *,
+            stdin_data: bytes = b"",
+            max_stdout_bytes: int = DEFAULT_MAX_AGENT_OUTPUT_BYTES,
+            allowed_returncodes: Iterable[int] = (0,),
         ) -> GitProcessResult:
-            result = super().run(selected, arguments, **kwargs)
+            result = super().run(
+                repository,
+                arguments,
+                stdin_data=stdin_data,
+                max_stdout_bytes=max_stdout_bytes,
+                allowed_returncodes=allowed_returncodes,
+            )
             if tuple(arguments) == (
                 "rev-parse",
                 "--is-inside-work-tree",
@@ -406,8 +423,8 @@ def test_040_persistent_repository_root_swap_is_out_of_band(tmp_path: Path) -> N
                 "--git-dir",
                 "--git-common-dir",
             ):
-                selected.rename(parked)
-                replacement.rename(selected)
+                repository.rename(parked)
+                replacement.rename(repository)
                 self.swapped = True
             return result
 

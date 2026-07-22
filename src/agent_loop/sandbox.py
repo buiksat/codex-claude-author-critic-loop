@@ -187,9 +187,7 @@ def probe_bubblewrap_package() -> BubblewrapProvenance:
     if digest not in SUPPORTED_BWRAP_SHA256:
         raise fail(StopReason.BWRAP_PACKAGE_OR_MODE_UNSAFE, "unexpected Bubblewrap binary hash")
 
-    package = _small_command(
-        ("/usr/bin/dpkg-query", "-W", "-f=${Version}", "bubblewrap")
-    )
+    package = _small_command(("/usr/bin/dpkg-query", "-W", "-f=${Version}", "bubblewrap"))
     if package.returncode != 0:
         raise fail(StopReason.BWRAP_PACKAGE_OR_MODE_UNSAFE, "Bubblewrap package query failed")
     package_version = package.stdout.decode("ascii", "strict")

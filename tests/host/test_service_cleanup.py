@@ -13,6 +13,11 @@ from agent_loop.sandbox_init import SandboxRequest, SupervisorLimits, encode_req
 from agent_loop.service import ServiceLimits, ServiceResult, TransientServiceRunner
 
 
+def _object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
 def _request(code: str, *, timeout_ms: int = 2_000) -> SandboxRequest:
     return SandboxRequest(
         manifest=SubjectManifest.empty(),
@@ -37,9 +42,7 @@ def _request(code: str, *, timeout_ms: int = 2_000) -> SandboxRequest:
 
 def _sandbox_command() -> tuple[str, ...]:
     source = Path("src").resolve()
-    policy = SandboxPolicy.validation(
-        mounts=(SandboxMount(os.fspath(source), "/opt/agent-loop"),)
-    )
+    policy = SandboxPolicy.validation(mounts=(SandboxMount(os.fspath(source), "/opt/agent-loop"),))
     return build_bwrap_argv(
         policy,
         (
@@ -64,7 +67,8 @@ def _run_service(request: SandboxRequest) -> tuple[dict[str, object], ServiceRes
             output_max_bytes=2 * 1024 * 1024,
         ),
     )
-    result = json.loads(service.process.stdout)
+    decoded: object = json.loads(service.process.stdout)
+    result = _object(decoded)
     return result, service
 
 
@@ -81,9 +85,11 @@ while not pathlib.Path('daemon-ready').exists(): time.sleep(0.001)
 """
     result, service = _run_service(_request(code))
     assert result["kind"] == "result"
-    assert result["cleanup"]["namespace_empty"] is True
-    assert result["cleanup"]["terminated_pids"] >= 1
-    assert result["cleanup"]["export_started_after_cleanup"] is True
+    cleanup = _object(result["cleanup"])
+    assert cleanup["namespace_empty"] is True
+    assert isinstance(cleanup["terminated_pids"], int)
+    assert cleanup["terminated_pids"] >= 1
+    assert cleanup["export_started_after_cleanup"] is True
     assert service.cgroup_empty is True
     assert service.process.returncode == 0
 
@@ -99,7 +105,9 @@ while True: time.sleep(1)
 """
     result, service = _run_service(_request(code, timeout_ms=100))
     assert result["kind"] == "result"
-    assert result["process"]["timed_out"] is True
-    assert result["cleanup"]["namespace_empty"] is True
-    assert result["cleanup"]["terminated_pids"] >= 1
+    assert _object(result["process"])["timed_out"] is True
+    cleanup = _object(result["cleanup"])
+    assert cleanup["namespace_empty"] is True
+    assert isinstance(cleanup["terminated_pids"], int)
+    assert cleanup["terminated_pids"] >= 1
     assert service.cgroup_empty is True

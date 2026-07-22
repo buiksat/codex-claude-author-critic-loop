@@ -3,6 +3,8 @@ import hashlib
 import pytest
 
 from agent_loop.errors import AgentLoopError, StopReason
+from agent_loop.manifests import SubjectManifest
+from agent_loop.models import ManifestEntry, PathPolicy
 from agent_loop.validation import (
     CheckExecution,
     ValidationSummary,
@@ -10,8 +12,6 @@ from agent_loop.validation import (
     classify_validations,
     verify_validation_mutation,
 )
-from agent_loop.manifests import SubjectManifest
-from agent_loop.models import ManifestEntry, PathPolicy
 
 
 def check(code: int, *, ident: str = "tests") -> CheckExecution:

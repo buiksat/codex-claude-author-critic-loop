@@ -29,6 +29,16 @@ from agent_loop.service import (
 )
 
 
+def _object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _string(value: object) -> str:
+    assert isinstance(value, str)
+    return value
+
+
 def _request(
     code: str,
     *,
@@ -75,8 +85,7 @@ def _run(request: SandboxRequest, *, workspace_bytes: int) -> tuple[int, dict[st
     completed = subprocess.run(
         build_bwrap_argv(policy, command),
         input=encode_request(request),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         close_fds=True,
         check=False,
@@ -113,15 +122,20 @@ def _run_service(request: SandboxRequest, limits: ServiceLimits) -> ServiceResul
 
 
 def _result_blob(response: dict[str, object], path: bytes) -> bytes:
-    entries = {
-        base64.b64decode(entry["path_b64"]): entry
-        for entry in response["candidate_manifest"]["entries"]
-    }
-    blobs = {
-        blob["sha256"]: base64.b64decode(blob["data_b64"])
-        for blob in response["new_blobs"]
-    }
-    return blobs[entries[path]["blob_sha256"]]
+    candidate_manifest = _object(response["candidate_manifest"])
+    raw_entries = candidate_manifest["entries"]
+    assert isinstance(raw_entries, list)
+    entries: dict[bytes, dict[str, object]] = {}
+    for value in raw_entries:
+        entry = _object(value)
+        entries[base64.b64decode(_string(entry["path_b64"]))] = entry
+    raw_blobs = response["new_blobs"]
+    assert isinstance(raw_blobs, list)
+    blobs: dict[str, bytes] = {}
+    for value in raw_blobs:
+        blob = _object(value)
+        blobs[_string(blob["sha256"])] = base64.b64decode(_string(blob["data_b64"]))
+    return blobs[_string(entries[path]["blob_sha256"])]
 
 
 @pytest.mark.host
@@ -132,8 +146,8 @@ def test_010_primary_output_limit_stops_process_and_still_proves_cleanup() -> No
     )
     assert returncode == 0, stderr.decode("utf-8", "backslashreplace")
     assert result["kind"] == "result"
-    assert result["process"]["output_limited"] is True
-    assert result["cleanup"]["namespace_empty"] is True
+    assert _object(result["process"])["output_limited"] is True
+    assert _object(result["cleanup"])["namespace_empty"] is True
 
 
 @pytest.mark.host
@@ -145,7 +159,7 @@ def test_010_max_files_fails_closed_without_candidate_export() -> None:
     )
     assert returncode == 2
     assert result["kind"] == "error"
-    assert result["error"]["reason"] == "unsafe_file_type_or_hard_link"
+    assert _object(result["error"])["reason"] == "unsafe_file_type_or_hard_link"
     assert "candidate_manifest" not in result
 
 
@@ -158,8 +172,9 @@ def test_010_tmpfs_byte_ceiling_is_a_real_enospc_boundary() -> None:
     )
     assert returncode == 0, stderr.decode("utf-8", "backslashreplace")
     assert result["kind"] == "result"
-    assert result["process"]["returncode"] != 0
-    assert b"No space left on device" in base64.b64decode(result["process"]["stderr_b64"])
+    process = _object(result["process"])
+    assert process["returncode"] != 0
+    assert b"No space left on device" in base64.b64decode(_string(process["stderr_b64"]))
 
 
 @pytest.mark.host
@@ -299,8 +314,7 @@ def test_010_memory_max_cgroup_file_caps_stressed_workload() -> None:
                     "--property=ControlGroup",
                     "--value",
                 ),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 env=service_environment(),
                 close_fds=True,
                 check=False,
@@ -315,9 +329,7 @@ def test_010_memory_max_cgroup_file_caps_stressed_workload() -> None:
             pytest.xfail("blocked: live user-service cgroup path is unavailable")
         cgroup = Path("/sys/fs/cgroup") / control_group.lstrip("/")
         try:
-            assert (cgroup / "memory.max").read_text(encoding="ascii").strip() == str(
-                memory_max
-            )
+            assert (cgroup / "memory.max").read_text(encoding="ascii").strip() == str(memory_max)
         except FileNotFoundError:
             pytest.xfail("blocked: cgroup-v2 memory controller is unavailable")
 

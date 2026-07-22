@@ -17,9 +17,7 @@ from .constants import (
 
 VALIDATION_BATCH_SENTINEL = "/opt/agent-loop-runtime/agent_loop/.validation-batch-v1"
 MAX_VALIDATION_CHECKS = 128
-MAX_VALIDATION_BATCH_RESULT_BYTES = (
-    ((DEFAULT_MAX_RAW_LOG_BYTES + 2) // 3) * 4 + 2 * 1024 * 1024
-)
+MAX_VALIDATION_BATCH_RESULT_BYTES = ((DEFAULT_MAX_RAW_LOG_BYTES + 2) // 3) * 4 + 2 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,9 +139,7 @@ def parse_validation_batch_request(data: bytes) -> ValidationBatchRequest:
             ValidationBatchCheck(
                 _text(check["check_id"], 256, "validation check ID"),
                 _text(check["command"], DEFAULT_MAX_FIELD_BYTES, "validation command"),
-                _integer(
-                    check["timeout_ms"], 1, DEFAULT_MAX_RUNTIME_SECONDS * 1000, "timeout_ms"
-                ),
+                _integer(check["timeout_ms"], 1, DEFAULT_MAX_RUNTIME_SECONDS * 1000, "timeout_ms"),
                 _integer(
                     check["output_max_bytes"],
                     1,

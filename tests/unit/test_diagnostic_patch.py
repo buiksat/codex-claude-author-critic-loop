@@ -89,9 +89,7 @@ def test_070_projection_exactly_covers_all_manifest_change_shapes_and_hashes() -
     assert any(isinstance(value, list) and "executable-mode" in value for value in aspects)
     assert any(isinstance(value, list) and "rename-equivalent" in value for value in aspects)
 
-    expected_hashes = {
-        entry.content_sha256 for entry in (*base.entries, *candidate.entries)
-    }
+    expected_hashes = {entry.content_sha256 for entry in (*base.entries, *candidate.entries)}
     projected_hashes: set[str] = set()
     for record in records:
         for side_name in ("before", "after"):
@@ -108,9 +106,7 @@ def test_047_projection_uses_lossless_identity_and_safe_display_for_arbitrary_pa
     blobs = MemoryBlobs()
     candidate = SubjectManifest.build([regular(blobs, b"line\n\xff", b"value")])
 
-    record = decode_lines(
-        render_diagnostic_patch(SubjectManifest.empty(), candidate, blobs)
-    )[1]
+    record = decode_lines(render_diagnostic_patch(SubjectManifest.empty(), candidate, blobs))[1]
     after = record["after"]
 
     assert isinstance(after, dict)

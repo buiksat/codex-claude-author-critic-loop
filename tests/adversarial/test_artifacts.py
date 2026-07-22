@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import agent_loop.filesystem as filesystem_module
 from agent_loop.artifacts import ArtifactStore, ContentAddressedBlobStore
 from agent_loop.errors import AgentLoopError, StopReason
 
@@ -73,7 +72,7 @@ def test_atomic_write_failure_preserves_prior_file_and_removes_temp(
         def fail_replace(*args: object, **kwargs: object) -> None:
             raise OSError(5, "injected replacement failure")
 
-        monkeypatch.setattr(filesystem_module.os, "replace", fail_replace)
+        monkeypatch.setattr(os, "replace", fail_replace)
         with pytest.raises(AgentLoopError):
             store.write_bytes("result", b"candidate")
         assert store.read_bytes("result", max_bytes=32) == b"prior"

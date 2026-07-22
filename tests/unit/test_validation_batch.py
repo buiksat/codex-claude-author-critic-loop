@@ -22,15 +22,16 @@ def test_validation_batch_protocol_round_trips_binary_streams() -> None:
     )
     assert parse_validation_batch_request(encode_validation_batch_request(request)) == request
 
-    records = (
-        ValidationBatchRecord(0, 1, False, False, True, 25, b"out\x00", b"err\xff"),
-    )
+    records = (ValidationBatchRecord(0, 1, False, False, True, 25, b"out\x00", b"err\xff"),)
     encoded = encode_validation_batch_result(records)
-    assert parse_validation_batch_result(
-        encoded,
-        expected_checks=1,
-        max_raw_output_bytes=8_192,
-    ) == records
+    assert (
+        parse_validation_batch_result(
+            encoded,
+            expected_checks=1,
+            max_raw_output_bytes=8_192,
+        )
+        == records
+    )
 
 
 def test_validation_batch_protocol_rejects_unknown_and_duplicate_properties() -> None:
@@ -82,8 +83,11 @@ def test_validation_batch_result_rejects_successful_prefix_and_accepts_terminal_
         )
 
     terminal = (ValidationBatchRecord(0, 0, True, False, False, 0, b"", b""),)
-    assert parse_validation_batch_result(
-        encode_validation_batch_result(terminal),
-        expected_checks=2,
-        max_raw_output_bytes=1,
-    ) == terminal
+    assert (
+        parse_validation_batch_result(
+            encode_validation_batch_result(terminal),
+            expected_checks=2,
+            max_raw_output_bytes=1,
+        )
+        == terminal
+    )

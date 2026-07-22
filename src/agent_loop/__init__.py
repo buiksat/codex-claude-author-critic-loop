@@ -3,4 +3,4 @@
 from .constants import SPEC_VERSION
 
 __all__ = ["SPEC_VERSION"]
-__version__ = "1.0.0"
+__version__ = "1.1.0"

@@ -17,7 +17,7 @@ import os
 import selectors
 import signal
 import stat
-import subprocess  # noqa: S404 - the reviewed runner is necessarily subprocess-based
+import subprocess
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -53,9 +53,7 @@ _READ_ONLY_GIT_CONFIG = (
     "protocol.ext.allow=never",
 )
 
-_ALLOWED_GIT_SUBCOMMANDS = frozenset(
-    {"cat-file", "config", "for-each-ref", "ls-tree", "rev-parse"}
-)
+_ALLOWED_GIT_SUBCOMMANDS = frozenset({"cat-file", "config", "for-each-ref", "ls-tree", "rev-parse"})
 _HEX_BYTES = frozenset(b"0123456789abcdef")
 _SOURCE_EXCLUSION_WARNING = (
     "all staged, unstaged, untracked, and ignored source-checkout changes are excluded; "
@@ -262,12 +260,12 @@ def _bounded_process(
             }[tag]
             try:
                 active_selector.unregister(pipe)
-            except (KeyError, ValueError):
-                pass  # noqa: S110 - best-effort idempotent cleanup
+            except KeyError, ValueError:
+                pass
             try:
                 pipe.close()
             except OSError:
-                pass  # noqa: S110 - process termination remains authoritative
+                pass
 
         def abort(reason: str) -> NoReturn:
             _kill_process_group(active_process)
@@ -290,8 +288,8 @@ def _bounded_process(
             for key, _ in events:
                 if key.data == "stdin":
                     try:
-                        chunk = pending_input[input_offset : input_offset + 65_536]
-                        written = os.write(key.fd, chunk)
+                        input_chunk = pending_input[input_offset : input_offset + 65_536]
+                        written = os.write(key.fd, input_chunk)
                     except BlockingIOError:
                         continue
                     except BrokenPipeError:
@@ -304,14 +302,14 @@ def _bounded_process(
                     continue
 
                 try:
-                    chunk = os.read(key.fd, 65_536)
+                    output_chunk = os.read(key.fd, 65_536)
                 except BlockingIOError:
                     continue
-                if not chunk:
+                if not output_chunk:
                     close_registered(key.data)
                     continue
                 target = output if key.data == "stdout" else errors
-                target.extend(chunk)
+                target.extend(output_chunk)
                 limit = max_stdout_bytes if key.data == "stdout" else max_stderr_bytes
                 if len(target) > limit:
                     abort(f"hardened Git {key.data} exceeded its byte limit")
@@ -336,10 +334,10 @@ def _bounded_process(
             except BaseException as cleanup_error:
                 cleanup_errors.append(cleanup_error)
         if process is not None:
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
+            for process_stream in (process.stdin, process.stdout, process.stderr):
+                if process_stream is not None:
                     try:
-                        stream.close()
+                        process_stream.close()
                     except BaseException as cleanup_error:
                         cleanup_errors.append(cleanup_error)
             try:
@@ -355,9 +353,9 @@ def _bounded_process(
                     cleanup_errors.append(cleanup_error)
             except BaseException as cleanup_error:
                 cleanup_errors.append(cleanup_error)
-        for cleanup_error in cleanup_errors:
+        for cleanup_failure in cleanup_errors:
             primary_error.add_note(
-                f"post-spawn Git cleanup also failed: {type(cleanup_error).__name__}"
+                f"post-spawn Git cleanup also failed: {type(cleanup_failure).__name__}"
             )
         raise
     else:
@@ -459,9 +457,7 @@ class GitCommandRunner:
         self.sandbox_mode = sandbox_mode
         self.timeout_seconds = timeout_seconds
         self.max_stderr_bytes = max_stderr_bytes
-        self.service_runner = (
-            TransientServiceRunner() if service_runner is None else service_runner
-        )
+        self.service_runner = TransientServiceRunner() if service_runner is None else service_runner
         self._repository_fd: int | None = None
         self._repository_identity: tuple[int, int] | None = None
 
@@ -1064,9 +1060,9 @@ def _require_repository_path_identity(repository: Path, repository_fd: int) -> N
             StopReason.OUT_OF_BAND_CHANGE,
             f"source repository root changed during extraction: errno {exc.errno}",
         ) from exc
-    if (
-        not stat.S_ISDIR(named.st_mode)
-        or (named.st_dev, named.st_ino) != (retained.st_dev, retained.st_ino)
+    if not stat.S_ISDIR(named.st_mode) or (named.st_dev, named.st_ino) != (
+        retained.st_dev,
+        retained.st_ino,
     ):
         raise fail(
             StopReason.OUT_OF_BAND_CHANGE,
@@ -1329,12 +1325,8 @@ def extract_committed_head(
             tree_entries = _parse_ls_tree(tree_result.stdout, limits=selected_limits)
 
             object_ids = tuple(dict.fromkeys(entry.object_id for entry in tree_entries))
-            batch_input = b"".join(
-                object_id.encode("ascii") + b"\n" for object_id in object_ids
-            )
-            batch_output_bound = (
-                selected_limits.max_total_subject_bytes + len(object_ids) * 160 + 1
-            )
+            batch_input = b"".join(object_id.encode("ascii") + b"\n" for object_id in object_ids)
+            batch_output_bound = selected_limits.max_total_subject_bytes + len(object_ids) * 160 + 1
             batch_result = selected_runner.run(
                 root,
                 ("cat-file", "--batch"),
@@ -1361,11 +1353,7 @@ def extract_committed_head(
             scan_records = (
                 ScanRecord(
                     path=entry.path,
-                    kind=(
-                        EntryKind.SYMLINK
-                        if entry.mode == SYMLINK_MODE
-                        else EntryKind.REGULAR
-                    ),
+                    kind=(EntryKind.SYMLINK if entry.mode == SYMLINK_MODE else EntryKind.REGULAR),
                     mode=entry.mode,
                     payload=object_data[entry.object_id],
                 )

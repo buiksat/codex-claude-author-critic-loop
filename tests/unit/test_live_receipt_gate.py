@@ -4,10 +4,9 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
-
-from agent_loop.constants import SUPPORTED_CLAUDE_VERSION, SUPPORTED_CODEX_VERSION
 from tests import conftest as root_conftest
 from tests.real_cli import live_support
 from tests.real_cli.live_support import (
@@ -15,6 +14,9 @@ from tests.real_cli.live_support import (
     LiveGateReportLedger,
     inspect_live_install,
 )
+
+from agent_loop.constants import SUPPORTED_CLAUDE_VERSION, SUPPORTED_CODEX_VERSION
+from agent_loop.sandbox import SandboxMount
 
 
 @pytest.fixture
@@ -99,12 +101,16 @@ def test_receipt_ledger_rejects_a_collection_time_skip() -> None:
 
 
 def test_each_pytest_session_resets_receipt_ledger_and_observed_selectors() -> None:
+    # Other tests in the same process may legitimately have disqualified the
+    # session-wide live ledger before this unit test runs.  Establish the
+    # precondition under test explicitly instead of depending on file order.
+    root_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace()))
     _record_complete_passes(root_conftest._LEDGER)
     live_support._OBSERVED_VALUES["AGENT_LOOP_STATE_HOME"] = "/stale"
     live_support._OBSERVED_MANAGED_CLAUDE_BOUNDARY = object()  # type: ignore[assignment]
     assert root_conftest._LEDGER.eligible(int(pytest.ExitCode.OK)) is True
 
-    root_conftest.pytest_sessionstart(SimpleNamespace())
+    root_conftest.pytest_sessionstart(cast(pytest.Session, SimpleNamespace()))
 
     assert root_conftest._LEDGER.eligible(int(pytest.ExitCode.OK)) is False
     assert live_support._OBSERVED_VALUES == {}
@@ -124,12 +130,8 @@ def test_host_preflight_uses_immutable_defaults_outside_live_sessions(
 
     codex, claude = live_support.selected_host_preflight_executables()
 
-    assert codex == (
-        Path.home() / ".npm-global/lib/node_modules/@openai/codex/bin/codex.js"
-    )
-    assert claude == (
-        Path.home() / ".local/share/claude/versions" / SUPPORTED_CLAUDE_VERSION
-    )
+    assert codex == (Path.home() / ".npm-global/lib/node_modules/@openai/codex/bin/codex.js")
+    assert claude == (Path.home() / ".local/share/claude/versions" / SUPPORTED_CLAUDE_VERSION)
 
 
 def test_host_preflight_uses_reviewed_installs_during_live_sessions(
@@ -167,9 +169,7 @@ def test_live_installs_use_the_same_production_mount_boundaries(
     codex_executable.write_bytes(b"#!/usr/bin/env node\n")
     codex_executable.chmod(0o755)
     (codex_root / "package.json").write_text(
-        '{"name":"@openai/codex","version":"'
-        + SUPPORTED_CODEX_VERSION
-        + '"}',
+        '{"name":"@openai/codex","version":"' + SUPPORTED_CODEX_VERSION + '"}',
         encoding="utf-8",
     )
 
@@ -198,7 +198,7 @@ def test_live_installs_use_the_same_production_mount_boundaries(
     claude = inspect_live_install("claude")
 
     assert codex.host_executable == codex_executable
-    assert codex.mount == live_support.SandboxMount(
+    assert codex.mount == SandboxMount(
         os.fspath(codex_root),
         "/opt/agent-loop-tools/codex-package",
         read_only=True,
@@ -207,7 +207,7 @@ def test_live_installs_use_the_same_production_mount_boundaries(
     assert codex.sandbox_executable == "/opt/agent-loop-tools/codex-package/bin/codex.js"
     assert codex.closure_sha256 == "a" * 64
     assert claude.host_executable == claude_executable
-    assert claude.mount == live_support.SandboxMount(
+    assert claude.mount == SandboxMount(
         os.fspath(claude_executable),
         "/opt/agent-loop-tools/claude",
         read_only=True,

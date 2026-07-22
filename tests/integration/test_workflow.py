@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import agent_loop.credentials as credential_module
 import agent_loop.workflow as workflow
 from agent_loop.artifacts import ArtifactStore
-from agent_loop.capabilities import CapabilityReceiptError
+from agent_loop.author_service import AuthorServiceProvenance
+from agent_loop.capabilities import (
+    CAPABILITY_RECEIPT_RELATIVE_PATH,
+    CapabilityReceiptError,
+    LiveCapabilityBinding,
+    ManagedClaudeBoundaryCapabilityBinding,
+)
+from agent_loop.claude_client import (
+    CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+    CLAUDE_REAUTHENTICATION_NEXT_ACTION,
+)
 from agent_loop.claude_managed_policy import (
     MANAGED_CLAUDE_HELPER_SOURCE,
     MANAGED_CLAUDE_HELPER_TARGET,
@@ -18,11 +30,17 @@ from agent_loop.claude_managed_policy import (
     ManagedClaudeBoundary,
 )
 from agent_loop.cli import build_parser
+from agent_loop.codex_client import (
+    CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+    CODEX_REAUTHENTICATION_NEXT_ACTION,
+    classify_codex_process_result,
+)
+from agent_loop.config import ProjectConfig
 from agent_loop.constants import REGULAR_MODE, Limits
 from agent_loop.declassify import KnownSecret
 from agent_loop.errors import AgentLoopError, StopReason, fail
 from agent_loop.git_source import GitSourceSnapshot
-from agent_loop.manifests import build_manifest_from_scan
+from agent_loop.manifests import SubjectManifest, build_manifest_from_scan
 from agent_loop.models import BlobWriter, EntryKind, ScanRecord
 from agent_loop.preflight import EnvironmentReport, TrustedExecutable
 from agent_loop.runner import (
@@ -33,8 +51,9 @@ from agent_loop.runner import (
     ValidationRequest,
     ValidationTurn,
 )
-from agent_loop.schemas import CriticReview, Verdict
 from agent_loop.sandbox import BubblewrapProvenance, SandboxMount
+from agent_loop.schemas import CriticReview, Verdict
+from agent_loop.service import BoundedProcessResult
 from agent_loop.validation import CheckExecution, ValidationSummary
 from agent_loop.workflow import (
     ProductionWorkflowBackend,
@@ -141,7 +160,10 @@ class _FakeCritic:
         return CriticTurn(
             review,
             request.deadline - 1,
-            {"type": "result", "structured_output": {"verdict": "LGTM"}},
+            {
+                "type": "result",
+                "structured_output": {"review": {"verdict": "LGTM"}},
+            },
             observed_model="critic-exact",
             observed_effort="medium",
         )
@@ -369,6 +391,25 @@ def _production_environment() -> EnvironmentReport:
         python,
         codex,
         claude,
+        AuthorServiceProvenance(
+            protocol=1,
+            build_id="fixed-system-author-v1",
+            authorized_uid=1000,
+            socket_path="/run/agent-loop/author.sock",
+            socket_owner_uid=1000,
+            socket_mode=0o600,
+            socket_unit_sha256="e" * 64,
+            broker_unit_sha256="f" * 64,
+            socket_dropin_sha256="1" * 64,
+            config_sha256="2" * 64,
+            install_record_sha256="3" * 64,
+            runtime_closure_sha256="4" * 64,
+            wheel_sha256="5" * 64,
+            codex_closure_sha256="6" * 64,
+            effective_units_sha256="7" * 64,
+            package_version="1.1.0",
+            broker_probe=True,
+        ),
         True,
         True,
         True,
@@ -377,7 +418,7 @@ def _production_environment() -> EnvironmentReport:
 
 def _production_configuration() -> RunConfiguration:
     return RunConfiguration(
-        workflow.ProjectConfig(
+        ProjectConfig(
             author_model="gpt-5.4",
             author_effort="high",
             critic_model="claude-opus-4-6",
@@ -522,9 +563,9 @@ def test_production_capability_binding_contains_exact_managed_boundary(
     assert inspections == 1
     assert len(captured) == 1
     receipt_path, binding = captured[0]
-    assert receipt_path == preparation.state_home / workflow.CAPABILITY_RECEIPT_RELATIVE_PATH
-    assert isinstance(binding, workflow.LiveCapabilityBinding)
-    assert binding.managed_claude_boundary == workflow.ManagedClaudeBoundaryCapabilityBinding(
+    assert receipt_path == preparation.state_home / CAPABILITY_RECEIPT_RELATIVE_PATH
+    assert isinstance(binding, LiveCapabilityBinding)
+    assert binding.managed_claude_boundary == ManagedClaudeBoundaryCapabilityBinding(
         policy_path=boundary.policy_mount.source,
         helper_path=boundary.helper_mount.source,
         policy_sha256=boundary.policy_sha256,
@@ -564,6 +605,139 @@ def test_production_managed_boundary_receipt_mismatch_fails_before_runtime(
         backend.prove_capabilities(preparation)  # type: ignore[arg-type]
 
     assert caught.value.reason is StopReason.GITLESS_INVOCATION_PROBE_FAILED
+
+
+def test_missing_receipt_still_auto_enrolls_absent_default_cli_logins_without_spend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    codex_source = home / ".codex" / "auth.json"
+    claude_source = home / ".claude" / ".credentials.json"
+    codex_source.parent.mkdir(mode=0o700, parents=True)
+    claude_source.parent.mkdir(mode=0o700, parents=True)
+    codex_source.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "id_token": "codex-id-secret",
+                    "access_token": "codex-access-secret",
+                    "refresh_token": "codex-refresh-secret",
+                    "account_id": "00000000-0000-0000-0000-000000000000",
+                },
+                "last_refresh": "2026-07-21T00:00:00.000000Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    claude_source.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "claude-access-secret",
+                    "refreshToken": "claude-refresh-secret",
+                    "expiresAt": 1_800_000_000_000,
+                    "refreshTokenExpiresAt": 1_900_000_000_000,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": "pro",
+                    "rateLimitTier": "default",
+                },
+                "organizationUuid": "00000000-0000-0000-0000-000000000000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    codex_source.chmod(0o600)
+    claude_source.chmod(0o600)
+    monkeypatch.setattr(credential_module, "_authorized_passwd_home", lambda: home)
+
+    preparation = _production_preparation(tmp_path)
+    preparation.configuration = RunConfiguration(
+        ProjectConfig(
+            author_model="gpt-5.4",
+            author_effort="high",
+            critic_model="claude-opus-4-6",
+            critic_effort="medium",
+        ),
+        Path("/opt/codex"),
+        Path("/opt/claude"),
+    )
+    backend = ProductionWorkflowBackend()
+    monkeypatch.setattr(workflow, "inspect_managed_claude_boundary", _managed_boundary)
+    monkeypatch.setattr(
+        backend,
+        "_install",
+        lambda _preparation, *, name: _reviewed_install(name),
+    )
+    monkeypatch.setattr(workflow, "installed_runtime_closure_sha256", lambda: "3" * 64)
+    monkeypatch.setattr(
+        workflow,
+        "verify_live_capability_receipt",
+        lambda *_args: (_ for _ in ()).throw(CapabilityReceiptError("missing")),
+    )
+
+    with pytest.raises(AgentLoopError) as caught:
+        backend.prove_capabilities(preparation)  # type: ignore[arg-type]
+
+    assert caught.value.reason is StopReason.GITLESS_INVOCATION_PROBE_FAILED
+    codex_copy = (
+        preparation.state_home / "agent-loop" / "credentials" / "codex" / "default" / "auth.json"
+    )
+    claude_copy = (
+        preparation.state_home
+        / "agent-loop"
+        / "credentials"
+        / "claude"
+        / "default"
+        / "credentials.json"
+    )
+    assert codex_copy.read_bytes() == codex_source.read_bytes()
+    assert claude_copy.read_bytes() == claude_source.read_bytes()
+    assert stat.S_IMODE(codex_copy.stat().st_mode) == 0o600
+    assert stat.S_IMODE(claude_copy.stat().st_mode) == 0o600
+    assert not preparation.run_root.exists()
+
+
+def test_claude_status_probe_is_non_model_transactional_and_token_free(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class ProbeExecutor:
+        def execute(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(dict(kwargs))
+            process = SimpleNamespace(
+                returncode=0,
+                timed_out=False,
+                output_limited=False,
+                stdout=b'{"loggedIn":true,"authMethod":"claude.ai"}',
+            )
+            return SimpleNamespace(result=SimpleNamespace(process=process))
+
+    claude_home = tmp_path / "claude-home"
+    claude_home.mkdir()
+    assert workflow._claude_status_probe(
+        ProbeExecutor(),  # type: ignore[arg-type]
+        _reviewed_install("claude"),
+        claude_home,
+        _managed_boundary(),
+    )
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["argv"] == (
+        "/opt/reviewed-claude/executable",
+        "--safe-mode",
+        "auth",
+        "status",
+        "--json",
+    )
+    environment = call["environment"]
+    assert isinstance(environment, dict)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in environment
+    assert environment["CLAUDE_CONFIG_DIR"] == "/control/claude-home"
+    assert call["manifest"] == SubjectManifest.empty()
 
 
 def test_production_runtime_reuses_and_propagates_receipt_witnessed_boundary(
@@ -691,6 +865,42 @@ def test_declined_confirmation_follows_baseline_and_never_calls_a_model(
     assert "fake-token-never-persisted" not in joined
 
 
+def test_dry_run_resolves_static_contract_without_auth_artifacts_or_models(
+    tmp_path: Path,
+) -> None:
+    backend = _FakeBackend(tmp_path)
+    output: list[str] = []
+    args = _args(tmp_path)
+    args.dry_run = True
+
+    exit_code = execute_run(
+        args,
+        backend=backend,
+        io=WorkflowIO(write=output.append, read=lambda _prompt: "unexpected"),
+    )
+
+    assert exit_code == 0
+    assert backend.events == [
+        "canonical_source",
+        "source_lock",
+        "preflight",
+        "extract",
+        "source_lock_close",
+    ]
+    assert backend.run_root is None
+    preview = json.loads(output[0])
+    assert preview["mode"] == "dry-run"
+    assert preview["spending_authorized"] is False
+    assert preview["models_called"] is False
+    assert preview["credentials_loaded_or_imported"] is False
+    assert preview["artifacts_created"] is False
+    assert preview["validation_executed"] is False
+    assert preview["live_receipt_checked"] is False
+    assert preview["source"]["committed_revision"] == "a" * 40
+    assert preview["configuration"]["checks"] == ["python -m pytest"]
+    assert preview["next_steps"]["qualification"] == ("agent-loop qualify --live --accept-paid")
+
+
 def test_accepted_confirmation_runs_loop_and_materializes_authoritative_subject(
     tmp_path: Path,
 ) -> None:
@@ -722,6 +932,86 @@ def test_accepted_confirmation_runs_loop_and_materializes_authoritative_subject(
     assert current.stat().st_mode & 0o777 == 0o600
     assert backend.events[-2:] == ["credential_close", "source_lock_close"]
     assert any('"stop_reason": "converged"' in value for value in writes)
+
+
+def test_remote_codex_reauthentication_failure_reaches_terminal_json_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FakeBackend(tmp_path)
+
+    def rejected_session(_request: AuthorRequest) -> AuthorTurn:
+        backend.events.append("author")
+        classify_codex_process_result(
+            BoundedProcessResult(
+                1,
+                (
+                    b'{"type":"thread.started","thread_id":"thread-safe"}\n'
+                    b'{"type":"turn.failed","error":{"message":"access token refresh '
+                    b'failed: refresh_token_invalidated"}}\n'
+                ),
+                b"private vendor stderr",
+                1.0,
+                2.0,
+                False,
+                False,
+            )
+        )
+        raise AssertionError("the rejected Codex session must stop the author turn")
+
+    monkeypatch.setattr(backend.author, "turn", rejected_session)
+    writes: list[str] = []
+
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
+
+    terminal = json.loads(writes[-1])
+    assert terminal["stop_reason"] == "credential_refresh_failure"
+    assert terminal["detail"] == CODEX_REAUTHENTICATION_FAILURE_DETAIL
+    assert terminal["next_action"] == CODEX_REAUTHENTICATION_NEXT_ACTION
+    assert "claude auth" not in terminal["next_action"].lower()
+    assert "refresh_token_invalidated" not in writes[-1]
+    assert "private vendor stderr" not in writes[-1]
+    assert _run_json(backend)["stop_detail"] == CODEX_REAUTHENTICATION_FAILURE_DETAIL
+
+
+def test_remote_claude_reauthentication_failure_reaches_terminal_json_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FakeBackend(tmp_path)
+
+    def rejected_session(_request: CriticRequest) -> CriticTurn:
+        backend.events.append("critic")
+        raise fail(
+            StopReason.CREDENTIAL_REFRESH_FAILURE,
+            CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+        )
+
+    monkeypatch.setattr(backend.critic, "review", rejected_session)
+    writes: list[str] = []
+
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
+
+    terminal = json.loads(writes[-1])
+    assert terminal["stop_reason"] == "credential_refresh_failure"
+    assert terminal["detail"] == CLAUDE_REAUTHENTICATION_FAILURE_DETAIL
+    assert terminal["next_action"] == CLAUDE_REAUTHENTICATION_NEXT_ACTION
+    assert "codex login" not in terminal["next_action"].lower()
+    assert _run_json(backend)["stop_detail"] == CLAUDE_REAUTHENTICATION_FAILURE_DETAIL
 
 
 def test_capability_failure_is_durable_and_precedes_all_credential_access(
@@ -758,9 +1048,7 @@ def test_capability_failure_is_durable_and_precedes_all_credential_access(
     assert not (backend.run_root / "subjects" / "current").exists()
     assert not (backend.run_root / "artifacts" / "base-subject.json").exists()
     assert not (backend.run_root / "artifacts" / "project-config.json").exists()
-    staged_config = json.loads(
-        (backend.run_root / "artifacts" / "config.json").read_text()
-    )
+    staged_config = json.loads((backend.run_root / "artifacts" / "config.json").read_text())
     assert staged_config["protected_patterns"] == []
     assert staged_config["requested_author_model"] is None
     assert staged_config["operator_content_withheld_pending_credential_scan"] is True
@@ -773,19 +1061,20 @@ def test_configuration_matching_a_known_credential_is_never_retained(
     args = _args(tmp_path, assume_yes=True)
     args.check = ["printf fake-token-never-persisted"]
 
-    assert execute_run(
-        args,
-        backend=backend,
-        io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            args,
+            backend=backend,
+            io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     assert "runtime" not in backend.events
     assert "baseline" not in backend.events
     assert backend.run_root is not None
     assert not (backend.run_root / "artifacts" / "project-config.json").exists()
-    metadata = json.loads(
-        (backend.run_root / "artifacts" / "project-config.meta.json").read_text()
-    )
+    metadata = json.loads((backend.run_root / "artifacts" / "project-config.meta.json").read_text())
     assert metadata["content_withheld"] is True
     forbidden = b"fake-token-never-persisted"
     for path in backend.run_root.rglob("*"):
@@ -800,11 +1089,14 @@ def test_run_metadata_matching_a_known_credential_is_never_released(
     backend.source = tmp_path / "fake-token-never-persisted"
     backend.source.mkdir()
 
-    assert execute_run(
-        _args(tmp_path, assume_yes=True),
-        backend=backend,
-        io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     assert "runtime" not in backend.events
     manifest = _run_json(backend)
@@ -829,6 +1121,7 @@ def test_task_and_committed_source_credentials_never_enter_retained_storage(
     if surface == "task":
         args.task.write_bytes(forbidden)
     else:
+
         def extract_secret_source(
             source: Path,
             blobs: BlobWriter,
@@ -851,11 +1144,14 @@ def test_task_and_committed_source_credentials_never_enter_retained_storage(
 
         monkeypatch.setattr(backend, "extract_source", extract_secret_source)
 
-    assert execute_run(
-        args,
-        backend=backend,
-        io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            args,
+            backend=backend,
+            io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     assert "runtime" not in backend.events
     assert backend.run_root is not None
@@ -863,9 +1159,7 @@ def test_task_and_committed_source_credentials_never_enter_retained_storage(
     subject_meta = json.loads(
         (backend.run_root / "artifacts" / "base-subject.meta.json").read_text()
     )
-    task_meta = json.loads(
-        (backend.run_root / "artifacts" / "task.meta.json").read_text()
-    )
+    task_meta = json.loads((backend.run_root / "artifacts" / "task.meta.json").read_text())
     assert subject_meta["content_withheld"] is (surface == "source")
     assert task_meta["content_withheld"] is (surface == "task")
     for path in backend.run_root.rglob("*"):
@@ -892,19 +1186,20 @@ def test_refreshed_preparation_secret_rescans_task_before_any_release(
     backend = RefreshCollisionBackend(tmp_path)
     writes: list[str] = []
 
-    assert execute_run(
-        _args(tmp_path, assume_yes=True),
-        backend=backend,
-        io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     assert "credential_config_remove" in backend.events
     assert "credential_install" not in backend.events
     assert "runtime" not in backend.events
     assert backend.run_root is not None
-    task_meta = json.loads(
-        (backend.run_root / "artifacts" / "task.meta.json").read_text()
-    )
+    task_meta = json.loads((backend.run_root / "artifacts" / "task.meta.json").read_text())
     assert task_meta["content_withheld"] is True
     for path in backend.run_root.rglob("*"):
         if path.is_file():
@@ -934,11 +1229,14 @@ def test_structural_source_fingerprint_secret_is_withheld_from_operator_output(
     backend = StructuralSecretBackend(tmp_path)
     writes: list[str] = []
 
-    assert execute_run(
-        _args(tmp_path, assume_yes=True),
-        backend=backend,
-        io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     assert not backend.validator.requests
     output = json.loads(writes[-1])
@@ -1032,11 +1330,14 @@ def test_post_author_generation_scrubs_prior_task_source_and_baseline_evidence(
     monkeypatch.setattr(backend, "build_runtime", build_refreshing_runtime)
     writes: list[str] = []
 
-    assert execute_run(
-        args,
-        backend=backend,
-        io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            args,
+            backend=backend,
+            io=WorkflowIO(write=writes.append, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     assert backend.run_root is not None
     assert list(backend.run_root.iterdir()) == []
@@ -1055,11 +1356,14 @@ def test_yes_prints_baseline_summary_without_reading_confirmation(tmp_path: Path
     def forbidden_read(_prompt: str) -> str:
         raise AssertionError("--yes must not read interactive input")
 
-    assert execute_run(
-        _args(tmp_path, assume_yes=True),
-        backend=backend,
-        io=WorkflowIO(write=writes.append, read=forbidden_read),
-    ) == 0
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=writes.append, read=forbidden_read),
+        )
+        == 0
+    )
     preflight = next(value for value in writes if value.startswith("Paid-run preflight"))
     assert '"validation_baseline"' in preflight
     assert '"outcome": "passed"' in preflight
@@ -1125,15 +1429,20 @@ def test_subject_control_inputs_are_added_as_exact_protected_patterns(
     args.task = task
     args.config = config
 
-    assert execute_run(
-        args,
-        backend=backend,
-        io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
-    ) == 0
+    assert (
+        execute_run(
+            args,
+            backend=backend,
+            io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
+        )
+        == 0
+    )
 
     manifest = _run_json(backend)
-    assert "task[*].md" in manifest["protected_patterns"]
-    assert "config[[]1].toml" in manifest["protected_patterns"]
+    protected_patterns = manifest["protected_patterns"]
+    assert isinstance(protected_patterns, list)
+    assert "task[*].md" in protected_patterns
+    assert "config[[]1].toml" in protected_patterns
 
 
 def test_060_production_composition_detects_live_authoritative_tree_tampering(
@@ -1150,11 +1459,14 @@ def test_060_production_composition_detects_live_authoritative_tree_tampering(
         return original_turn(request)
 
     monkeypatch.setattr(backend.author, "turn", tampering_turn)
-    assert execute_run(
-        _args(tmp_path, assume_yes=True),
-        backend=backend,
-        io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
-    ) == 17
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "unexpected"),
+        )
+        == 17
+    )
 
     manifest = _run_json(backend)
     assert manifest["stop_reason"] == "out_of_band_change"
@@ -1179,11 +1491,14 @@ def test_finalization_error_does_not_replace_an_earlier_primary_fatal(
 
     monkeypatch.setattr(backend.author, "turn", tampering_turn)
     monkeypatch.setattr(workflow, "_materialize_final", fail_materialization)
-    assert execute_run(
-        _args(tmp_path, assume_yes=True),
-        backend=backend,
-        io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "yes"),
-    ) == 17
+    assert (
+        execute_run(
+            _args(tmp_path, assume_yes=True),
+            backend=backend,
+            io=WorkflowIO(write=lambda _value: None, read=lambda _prompt: "yes"),
+        )
+        == 17
+    )
 
     manifest = _run_json(backend)
     assert manifest["stop_reason"] == "out_of_band_change"

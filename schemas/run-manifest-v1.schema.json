@@ -335,6 +335,7 @@
         "python_executable",
         "codex",
         "claude",
+        "author_service",
         "openat2",
         "namespace_probe",
         "transient_service_probe"
@@ -367,9 +368,52 @@
             { "properties": { "version": { "const": "2.1.215 (Claude Code)" } } }
           ]
         },
+        "author_service": { "$ref": "#/$defs/authorService" },
         "openat2": { "const": true },
         "namespace_probe": { "type": "boolean" },
         "transient_service_probe": { "type": "boolean" }
+      }
+    },
+    "authorService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "build_id",
+        "authorized_uid",
+        "socket_path",
+        "socket_owner_uid",
+        "socket_mode",
+        "socket_unit_sha256",
+        "broker_unit_sha256",
+        "socket_dropin_sha256",
+        "config_sha256",
+        "install_record_sha256",
+        "runtime_closure_sha256",
+        "wheel_sha256",
+        "codex_closure_sha256",
+        "effective_units_sha256",
+        "package_version",
+        "broker_probe"
+      ],
+      "properties": {
+        "protocol": { "const": 1 },
+        "build_id": { "const": "fixed-system-author-v1" },
+        "authorized_uid": { "type": "integer", "minimum": 1 },
+        "socket_path": { "const": "/run/agent-loop/author.sock" },
+        "socket_owner_uid": { "type": "integer", "minimum": 1 },
+        "socket_mode": { "const": "0600" },
+        "socket_unit_sha256": { "$ref": "#/$defs/digest" },
+        "broker_unit_sha256": { "$ref": "#/$defs/digest" },
+        "socket_dropin_sha256": { "$ref": "#/$defs/digest" },
+        "config_sha256": { "$ref": "#/$defs/digest" },
+        "install_record_sha256": { "$ref": "#/$defs/digest" },
+        "runtime_closure_sha256": { "$ref": "#/$defs/digest" },
+        "wheel_sha256": { "$ref": "#/$defs/digest" },
+        "codex_closure_sha256": { "$ref": "#/$defs/digest" },
+        "effective_units_sha256": { "$ref": "#/$defs/digest" },
+        "package_version": { "const": "1.1.0" },
+        "broker_probe": { "type": "boolean" }
       }
     },
     "stopReason": {

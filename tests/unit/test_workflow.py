@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 
 from agent_loop.artifacts import ArtifactStore
+from agent_loop.claude_client import (
+    CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+    CLAUDE_REAUTHENTICATION_NEXT_ACTION,
+)
 from agent_loop.cli import build_parser
+from agent_loop.codex_client import (
+    CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+    CODEX_REAUTHENTICATION_NEXT_ACTION,
+)
 from agent_loop.constants import Limits
 from agent_loop.declassify import KnownSecret, raw_log_contains_known_secret
 from agent_loop.errors import AgentLoopError, StopReason
@@ -24,8 +32,9 @@ from agent_loop.sandbox_init import (
 )
 from agent_loop.service import BoundedProcessResult, ServiceResult
 from agent_loop.workflow import (
-    _KnownSecretLedger,
     _codex_artifact_evidence_barrier,
+    _credential_failure_operator_fields,
+    _KnownSecretLedger,
     _safe_outer_attempt_streams,
     _transaction_codex_known_secrets,
     parse_codex_file_auth,
@@ -160,6 +169,57 @@ def test_typed_sandbox_error_detail_cannot_persist_a_secret() -> None:
     assert secret.value.decode("ascii") not in caught.value.detail
 
 
+def test_only_fixed_codex_reauthentication_guidance_is_declassified() -> None:
+    fields, withheld = _credential_failure_operator_fields(
+        CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+        (),
+    )
+
+    assert withheld is False
+    assert fields == {
+        "detail": CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+        "next_action": CODEX_REAUTHENTICATION_NEXT_ACTION,
+    }
+    assert "claude" not in fields["next_action"].lower()
+
+    hostile = "remote process said credential-private-diagnostic"
+    generic, generic_withheld = _credential_failure_operator_fields(hostile, ())
+    assert generic_withheld is False
+    assert "detail" not in generic
+    assert hostile not in json.dumps(generic)
+    assert "codex login status" in generic["next_action"]
+    assert "claude auth status" in generic["next_action"]
+
+
+def test_only_fixed_claude_reauthentication_guidance_is_declassified() -> None:
+    fields, withheld = _credential_failure_operator_fields(
+        CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+        (),
+    )
+
+    assert withheld is False
+    assert fields == {
+        "detail": CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+        "next_action": CLAUDE_REAUTHENTICATION_NEXT_ACTION,
+    }
+    assert "codex login" not in fields["next_action"].lower()
+
+
+def test_terminal_credential_guidance_is_withheld_on_secret_collision() -> None:
+    fields, withheld = _credential_failure_operator_fields(
+        CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+        (
+            KnownSecret(
+                "synthetic-collision",
+                CODEX_REAUTHENTICATION_NEXT_ACTION.encode("utf-8"),
+            ),
+        ),
+    )
+
+    assert fields == {}
+    assert withheld is True
+
+
 def test_secret_ledger_keeps_every_refresh_generation() -> None:
     first = KnownSecret("codex-access_token", b"generation-a")
     second = KnownSecret("codex-access_token", b"generation-b")
@@ -249,9 +309,7 @@ def test_transaction_secret_snapshot_contains_pre_and_post_capture_generations()
     secrets = _transaction_codex_known_secrets(Transaction())  # type: ignore[arg-type]
 
     access_values = {
-        secret.value
-        for secret in secrets
-        if secret.identifier == "codex-access_token"
+        secret.value for secret in secrets if secret.identifier == "codex-access_token"
     }
     assert access_values == {b"access-generation-a", b"access-generation-b"}
 
@@ -333,6 +391,48 @@ max_rounds = 2
         "/opt/reviewed-one",
         "/opt/reviewed-two",
     )
+
+
+def test_run_configuration_uses_one_exact_receipt_bindable_model_pair_by_default(
+    tmp_path: Path,
+) -> None:
+    args = _run_args(
+        tmp_path,
+        "--check",
+        "python -m pytest",
+        "--codex-executable",
+        "/opt/codex/bin/codex",
+        "--claude-executable",
+        "/opt/claude/bin/claude",
+    )
+
+    selected = resolve_run_configuration(args)
+
+    assert selected.project.author_model == "gpt-5.4"
+    assert selected.project.author_effort == "high"
+    assert selected.project.critic_model == "claude-opus-4-6"
+    assert selected.project.critic_effort == "medium"
+    assert selected.project.codex_credential_id == "default"
+    assert selected.project.claude_credential_id == "default"
+
+
+def test_run_configuration_discovers_the_pinned_cli_pair_when_paths_are_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_loop.qualification as qualification
+
+    monkeypatch.setattr(
+        qualification,
+        "discover_pinned_cli_executables",
+        lambda: (Path("/opt/pinned/codex"), Path("/opt/pinned/claude")),
+    )
+    args = _run_args(tmp_path, "--check", "python -m pytest")
+
+    selected = resolve_run_configuration(args)
+
+    assert selected.codex_executable == Path("/opt/pinned/codex")
+    assert selected.claude_executable == Path("/opt/pinned/claude")
 
 
 def test_run_configuration_rejects_zero_validation_checks(tmp_path: Path) -> None:

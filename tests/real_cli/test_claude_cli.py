@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+from tests.real_cli.live_support import require_live, required_install
 
 from agent_loop.constants import SUPPORTED_CLAUDE_VERSION
 from agent_loop.schemas import critic_schema_document, critic_schema_json
 from agent_loop.service import run_bounded_process
-from tests.real_cli.live_support import require_live, required_install
 
 pytestmark = pytest.mark.real_cli
 
@@ -50,7 +50,7 @@ class _LocalProbeHandler(BaseHTTPRequestHandler):
 class _SchemaProbeHandler(_LocalProbeHandler):
     requests: ClassVar[list[bytes]] = []
 
-    def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler API
+    def do_POST(self) -> None:
         if not self._record_request():
             return
         self._respond_json(
@@ -60,6 +60,24 @@ class _SchemaProbeHandler(_LocalProbeHandler):
                 "error": {
                     "type": "invalid_request_error",
                     "message": "deterministic local schema probe stop",
+                },
+            },
+        )
+
+
+class _RetryCeilingProbeHandler(_LocalProbeHandler):
+    requests: ClassVar[list[bytes]] = []
+
+    def do_POST(self) -> None:
+        if not self._record_request():
+            return
+        self._respond_json(
+            500,
+            {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "deterministic local retryable failure",
                 },
             },
         )
@@ -83,7 +101,7 @@ _CANONICAL_BLOCKED_REVIEW = _blocked_review("External input is missing.")
 class _SchemaCorrectionProbeHandler(_LocalProbeHandler):
     requests: ClassVar[list[bytes]] = []
 
-    def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler API
+    def do_POST(self) -> None:
         if not self._record_request():
             return
         request_number = len(self.requests)
@@ -115,7 +133,7 @@ class _SchemaCorrectionProbeHandler(_LocalProbeHandler):
                         "type": "tool_use",
                         "id": f"toolu_local_{request_number}",
                         "name": "StructuredOutput",
-                        "input": review,
+                        "input": {"review": review},
                     }
                 ],
                 "stop_reason": "tool_use",
@@ -264,4 +282,34 @@ def test_051_pinned_claude_retries_conditional_schema_once_without_strict_warnin
     assert b"strict mode:" not in result.stderr
     envelope = json.loads(result.stdout)
     assert isinstance(envelope, dict)
-    assert envelope.get("structured_output") == _CANONICAL_BLOCKED_REVIEW
+    assert envelope.get("structured_output") == {"review": _CANONICAL_BLOCKED_REVIEW}
+
+
+def test_051_pinned_claude_honors_exact_api_retry_ceiling(tmp_path: Path) -> None:
+    """Two configured retries mean one initial local request plus two retries."""
+
+    require_live()
+    install = required_install("claude")
+    _RetryCeilingProbeHandler.requests = []
+    base_environment = _private_probe_environment(tmp_path)
+    _assert_pinned_claude_version(install.host_executable, base_environment)
+
+    with _local_probe_server(_RetryCeilingProbeHandler) as endpoint:
+        result = run_bounded_process(
+            _probe_argv(install.host_executable, max_turns=1),
+            timeout_seconds=30,
+            output_max_bytes=1024 * 1024,
+            env={
+                **base_environment,
+                "ANTHROPIC_API_KEY": "local-retry-probe-not-a-credential",
+                "ANTHROPIC_BASE_URL": endpoint,
+                "API_TIMEOUT_MS": "1000",
+                "CLAUDE_CODE_MAX_RETRIES": "2",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            },
+            input_bytes=b"LOCAL_RETRY_CEILING_PROBE_INPUT",
+        )
+
+    assert not result.timed_out and not result.output_limited
+    assert result.returncode == 1
+    assert len(_RetryCeilingProbeHandler.requests) == 3

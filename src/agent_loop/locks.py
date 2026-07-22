@@ -70,21 +70,24 @@ class SourceRunLock:
                     if time.monotonic() >= deadline:
                         raise TimeoutError("another agent-loop run holds the source lock") from None
                     time.sleep(0.01)
-            record = json.dumps(
-                {
-                    "schema_version": 1,
-                    "run_id": run_id,
-                    "pid": os.getpid(),
-                    "hostname": socket.gethostname(),
-                    "canonical_source": os.fspath(source),
-                    "source_sha256": key,
-                    "started_wall_time": time.time(),
-                },
-                ensure_ascii=True,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("ascii") + b"\n"
+            record = (
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": run_id,
+                        "pid": os.getpid(),
+                        "hostname": socket.gethostname(),
+                        "canonical_source": os.fspath(source),
+                        "source_sha256": key,
+                        "started_wall_time": time.time(),
+                    },
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii")
+                + b"\n"
+            )
             os.ftruncate(fd, 0)
             os.lseek(fd, 0, os.SEEK_SET)
             view = memoryview(record)

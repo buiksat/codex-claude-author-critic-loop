@@ -129,11 +129,7 @@ class LoopSettings:
     limits: Limits = field(default_factory=Limits)
 
     def __post_init__(self) -> None:
-        if (
-            self.max_rounds < 1
-            or self.max_runtime_seconds <= 0
-            or self.max_raw_log_bytes <= 0
-        ):
+        if self.max_rounds < 1 or self.max_runtime_seconds <= 0 or self.max_raw_log_bytes <= 0:
             raise ValueError("round and runtime limits must be positive")
         if not isinstance(self.limits, Limits):
             raise TypeError("limits must be a Limits instance")
@@ -414,7 +410,7 @@ def _bounded_author_events(
                 ).encode("ascii")
                 + b"\n"
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             invalid = True
             encoded = b'{"type":"unserializable-author-event"}\n'
         remaining = max_bytes - len(retained)
@@ -546,9 +542,7 @@ def _settings_document(
         "protected_patterns": (
             list(settings.protected_patterns) if retain_operator_strings else []
         ),
-        "opaque_patterns": (
-            list(settings.opaque_patterns) if retain_operator_strings else []
-        ),
+        "opaque_patterns": (list(settings.opaque_patterns) if retain_operator_strings else []),
         "requested_author_model": (
             settings.requested_author_model if retain_operator_strings else None
         ),
@@ -618,6 +612,25 @@ def _withheld_environment_document() -> dict[str, object]:
         "claude": {
             **withheld_executable,
             "version": "2.1.215 (Claude Code)",
+        },
+        "author_service": {
+            "protocol": 1,
+            "build_id": "fixed-system-author-v1",
+            "authorized_uid": os.geteuid(),
+            "socket_path": "/run/agent-loop/author.sock",
+            "socket_owner_uid": os.geteuid(),
+            "socket_mode": "0600",
+            "socket_unit_sha256": "0" * 64,
+            "broker_unit_sha256": "0" * 64,
+            "socket_dropin_sha256": "0" * 64,
+            "config_sha256": "0" * 64,
+            "install_record_sha256": "0" * 64,
+            "runtime_closure_sha256": "0" * 64,
+            "wheel_sha256": "0" * 64,
+            "codex_closure_sha256": "0" * 64,
+            "effective_units_sha256": "0" * 64,
+            "package_version": "1.1.0",
+            "broker_probe": False,
         },
         "openat2": True,
         "namespace_probe": False,
@@ -719,9 +732,7 @@ class ArtifactRunJournal:
                 self._manifest.update(
                     {
                         "stop_reason": StopReason.CREDENTIAL_REFRESH_FAILURE.value,
-                        "exit_code": int(
-                            exit_code_for(StopReason.CREDENTIAL_REFRESH_FAILURE)
-                        ),
+                        "exit_code": int(exit_code_for(StopReason.CREDENTIAL_REFRESH_FAILURE)),
                         "stop_detail": (
                             "retained evidence was withheld after a credential refresh"
                         ),
@@ -820,9 +831,7 @@ class ArtifactRunJournal:
     ) -> None:
         if not isinstance(content_withheld, bool):
             raise TypeError("subject content_withheld must be boolean")
-        self._subject_content_withheld = (
-            self._subject_content_withheld or content_withheld
-        )
+        self._subject_content_withheld = self._subject_content_withheld or content_withheld
         self._artifacts.write_bytes(
             "artifacts/base-subject.json",
             b"" if content_withheld else subject.to_json_bytes(),
@@ -832,9 +841,7 @@ class ArtifactRunJournal:
             {
                 "schema_version": 1,
                 "subject_fingerprint": (
-                    _WITHHELD_SUBJECT_FINGERPRINT
-                    if content_withheld
-                    else subject.fingerprint
+                    _WITHHELD_SUBJECT_FINGERPRINT if content_withheld else subject.fingerprint
                 ),
                 "content_withheld": content_withheld,
             },
@@ -1283,16 +1290,12 @@ class LoopRunner:
         self._known_secret_provider = known_secret_provider
 
     def _current_known_secrets(self) -> tuple[KnownSecret, ...]:
-        supplied = (
-            () if self._known_secret_provider is None else self._known_secret_provider()
-        )
+        supplied = () if self._known_secret_provider is None else self._known_secret_provider()
         if not isinstance(supplied, tuple) or not all(
             isinstance(secret, KnownSecret) for secret in supplied
         ):
             raise TypeError("known_secret_provider must return a tuple of KnownSecret values")
-        return tuple(
-            dict.fromkeys((*self._known_secrets, *supplied))
-        )
+        return tuple(dict.fromkeys((*self._known_secrets, *supplied)))
 
     def run(
         self,
@@ -1351,12 +1354,7 @@ class LoopRunner:
                         deadline=deadline,
                         settings=settings,
                     )
-                if not (
-                    task_withheld
-                    or base_withheld
-                    or settings_withheld
-                    or metadata_withheld
-                ):
+                if not (task_withheld or base_withheld or settings_withheld or metadata_withheld):
                     self._journal.start(
                         task=task,
                         base=base,
@@ -1641,7 +1639,7 @@ class LoopRunner:
                     encoded_detail,
                     self._current_known_secrets(),
                 )
-            except (AgentLoopError, UnicodeEncodeError):
+            except AgentLoopError, UnicodeEncodeError:
                 detail_contains_secret = True
             if detail_contains_secret:
                 return stop(
@@ -1711,9 +1709,7 @@ class LoopRunner:
             },
             current_secrets,
         )
-        retained = (
-            b"" if raw_log_withheld else turn.raw_log[: settings.max_raw_log_bytes]
-        )
+        retained = b"" if raw_log_withheld else turn.raw_log[: settings.max_raw_log_bytes]
         self._journal.validation_attempt(
             round_number,
             phase,

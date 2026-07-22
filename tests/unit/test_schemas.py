@@ -35,14 +35,14 @@ def review(verdict: str = "LGTM") -> dict[str, object]:
 
 
 def envelope(value: object) -> bytes:
-    return json.dumps({"type": "result", "structured_output": value}).encode()
+    return json.dumps({"type": "result", "structured_output": {"review": value}}).encode()
 
 
 def green() -> ApprovalContext:
     return ApprovalContext(True, True, True)
 
 
-def test_valid_lgtm_is_extracted_only_from_top_level_structured_output() -> None:
+def test_valid_lgtm_is_extracted_only_from_structured_output_review() -> None:
     raw, parsed = parse_critic_envelope(envelope(review()), approval=green())
     assert raw["type"] == "result"
     assert parsed.verdict is Verdict.LGTM
@@ -94,6 +94,23 @@ def test_052_prose_approval_and_missing_structured_output_are_rejected() -> None
         parse_critic_envelope(json.dumps({"result": "LGTM"}).encode())
     with pytest.raises(AgentLoopError):
         parse_critic_envelope(b'{"structured_output":{},"structured_output":{}}')
+
+
+@pytest.mark.parametrize(
+    "structured_output",
+    [
+        review(),
+        {},
+        {"review": review(), "unknown": True},
+        {"review": []},
+    ],
+)
+def test_structured_output_requires_exact_review_wrapper(structured_output: object) -> None:
+    with pytest.raises(AgentLoopError) as caught:
+        parse_critic_envelope(
+            json.dumps({"type": "result", "structured_output": structured_output}).encode()
+        )
+    assert caught.value.reason is StopReason.INVALID_STRUCTURED_OUTPUT
 
 
 def test_hostile_json_depth_and_integer_size_are_invalid_not_internal() -> None:

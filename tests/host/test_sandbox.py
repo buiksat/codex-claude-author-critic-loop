@@ -14,6 +14,16 @@ from agent_loop.sandbox import SandboxMount, SandboxPolicy, build_bwrap_argv
 from agent_loop.sandbox_init import SandboxRequest, SupervisorLimits, encode_request
 
 
+def _object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _string(value: object) -> str:
+    assert isinstance(value, str)
+    return value
+
+
 def _empty_request(code: str) -> SandboxRequest:
     return SandboxRequest(
         manifest=SubjectManifest.empty(),
@@ -45,9 +55,7 @@ def _run_bwrap(
     request: SandboxRequest,
 ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, object]]:
     source = Path("src").resolve()
-    policy = SandboxPolicy.validation(
-        mounts=(SandboxMount(os.fspath(source), "/opt/agent-loop"),)
-    )
+    policy = SandboxPolicy.validation(mounts=(SandboxMount(os.fspath(source), "/opt/agent-loop"),))
     command = (
         "/usr/bin/env",
         "PYTHONPATH=/opt/agent-loop",
@@ -58,14 +66,14 @@ def _run_bwrap(
     completed = subprocess.run(
         build_bwrap_argv(policy, command),
         input=encode_request(request),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         close_fds=True,
         check=False,
         timeout=10,
     )
-    result = json.loads(completed.stdout) if completed.stdout else {}
+    decoded: object = json.loads(completed.stdout) if completed.stdout else {}
+    result = _object(decoded)
     return completed, result
 
 
@@ -82,10 +90,17 @@ def test_009_full_tmpfs_is_exported_only_after_cleanup() -> None:
         "namespace_empty": True,
         "terminated_pids": 0,
     }
-    assert base64.b64decode(result["process"]["stdout_b64"]) == b"ok\n"
-    entries = result["candidate_manifest"]["entries"]
-    assert [base64.b64decode(entry["path_b64"]) for entry in entries] == [b"created"]
-    assert [base64.b64decode(blob["data_b64"]) for blob in result["new_blobs"]] == [
+    process = _object(result["process"])
+    assert base64.b64decode(_string(process["stdout_b64"])) == b"ok\n"
+    candidate_manifest = _object(result["candidate_manifest"])
+    entries = candidate_manifest["entries"]
+    assert isinstance(entries, list)
+    assert [base64.b64decode(_string(_object(entry)["path_b64"])) for entry in entries] == [
+        b"created"
+    ]
+    new_blobs = result["new_blobs"]
+    assert isinstance(new_blobs, list)
+    assert [base64.b64decode(_string(_object(blob)["data_b64"])) for blob in new_blobs] == [
         b"candidate"
     ]
 
@@ -100,15 +115,20 @@ def test_009_sandbox_init_is_pid_one_and_workspace_has_no_host_backing() -> None
     )
     completed, result = _run_bwrap(request)
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "backslashreplace")
-    exported = {
-        blob["sha256"]: base64.b64decode(blob["data_b64"])
-        for blob in result["new_blobs"]
-    }
-    entry_by_path = {
-        base64.b64decode(entry["path_b64"]): entry
-        for entry in result["candidate_manifest"]["entries"]
-    }
-    identity = exported[entry_by_path[b"identity"]["blob_sha256"]]
-    mount = exported[entry_by_path[b"mount"]["blob_sha256"]]
+    raw_blobs = result["new_blobs"]
+    assert isinstance(raw_blobs, list)
+    exported: dict[str, bytes] = {}
+    for value in raw_blobs:
+        blob = _object(value)
+        exported[_string(blob["sha256"])] = base64.b64decode(_string(blob["data_b64"]))
+    candidate_manifest = _object(result["candidate_manifest"])
+    raw_entries = candidate_manifest["entries"]
+    assert isinstance(raw_entries, list)
+    entry_by_path: dict[bytes, dict[str, object]] = {}
+    for value in raw_entries:
+        entry = _object(value)
+        entry_by_path[base64.b64decode(_string(entry["path_b64"]))] = entry
+    identity = exported[_string(entry_by_path[b"identity"]["blob_sha256"])]
+    mount = exported[_string(entry_by_path[b"mount"]["blob_sha256"])]
     assert identity in {b"python3", b"python3.14"}
     assert b" /workspace tmpfs " in mount

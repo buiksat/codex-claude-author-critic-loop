@@ -87,7 +87,7 @@ class Decision:
 
 
 def decide(observation: RoundObservation, fatal: FatalLatch) -> Decision:
-    """Apply the exact plan-v1.0 fatal/success/BLOCKED/cap/stall order."""
+    """Apply the exact plan-v1.1 fatal/success/BLOCKED/cap/stall order."""
 
     if (
         observation.critic_completed_at is not None

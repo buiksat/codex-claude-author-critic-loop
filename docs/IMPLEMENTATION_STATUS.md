@@ -1,24 +1,29 @@
-# plan-v1.0 implementation status
+# plan-v1.1 successor implementation status
 
-This document is implementation evidence for the frozen `PLAN.md`; it does not replace or amend
-that specification. A status is `passed` only after executable coverage for every claimed clause
-ran successfully. `partial; live blocked` means deterministic coverage passed but a pinned-CLI
-behavioral clause remains unproved. A skip, xfail, simulation, or partial probe is never counted as
-completion.
+This document records implementation evidence for the unfrozen `PLAN.md` successor. It does not
+freeze or amend that specification. The immutable `plan-v1.0` tag remains historical. A contract is
+`passed` only after every claimed clause runs successfully against the current successor topology;
+a skip, xfail, simulation, predecessor result, or partial probe is never completion.
 
-The post-remediation collection contains 674 tests. The portable matrix passed 646 tests with 28
-host/real-CLI tests deselected; the host-marked matrix passed 22 tests with 652 deselected; and the
-complete non-real-CLI matrix passed 668 tests with six real-CLI tests deselected. Two separately
-selected non-model Codex CLI probes and two pinned-Claude schema probes against process-local fake
-endpoints passed. The first explicitly authorized combined qualification finished with 23 passes
-and three failures before Codex resume. After its selector and credential
-remediations, the second exercised the Claude review, Codex first turn, and exact Codex resume, then
-finished with 24 passes and two failures. No receipt was written. These counts do not turn the
-partial or blocked contracts below into passed contracts.
+**Overall status: implementation qualified on the pinned host; specification still unfrozen.**
+`plan-v1.1` has 78 acceptance contracts and uses a schema-v3 `live-v3.json` receipt. The final
+current-tree automated suite completed with **814 passed and 8 skipped**. Skipped nodes were not
+counted as passes. The installed qualifier from the exact reviewed wheel separately completed all
+18 receipt-bound target-host/live gates and minted the production receipt. The deterministic/host
+suite and installed qualification together provide passing evidence for all 78 contracts; the
+18-gate receipt alone is deliberately not described as 78/78 conformance.
+
+The repaired topology is live-qualified. The fixed root-owned author broker preserves Ubuntu's
+AppArmor restriction while leaving Codex's one mandatory inner Bubblewrap transition available.
+Pinned Claude accepted the closed plain-object review-wrapper schema with its nested `anyOf`,
+returned top-level `structured_output.review`, and passed the exact managed-boundary, selection,
+retry, and account-isolation checks. The receipt makes production execution eligible only for its
+exact binding and validity window. `PLAN.md` nevertheless remains unfrozen because its documented
+issue/PR, complete-review, merge, and annotated `plan-v1.1` tag workflow has not been completed.
 
 ## Detected environment
 
-| Component | Detected | Frozen target | Result |
+| Component | Detected | Pinned target | Result |
 |---|---|---|---|
 | OS | Ubuntu 26.04 LTS (Resolute), x86_64 | Ubuntu 26.04, x86_64 | compatible |
 | Kernel | Linux 7.0.0-28-generic | reviewed Ubuntu 26.04 kernel | compatible; probes passed |
@@ -27,50 +32,37 @@ partial or blocked contracts below into passed contracts.
 | Bash | 5.3.x | 5.3.x | compatible |
 | Bubblewrap | upstream 0.11.1; package `0.11.1-1ubuntu0.1`; `/usr/bin/bwrap`, root:root, mode `0755`, SHA-256 `0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0` | exact patched non-setuid build | compatible; provenance and negative probes passed |
 | systemd user manager | systemd 259; user manager running | transient user services on 259 | compatible; lifecycle/resource probes passed |
-| Codex CLI | 0.144.6 | 0.144.6 | version/help and non-model prompt-input probes passed; the first paid attempt used absent selector `gpt-5.4-codex` and failed after `thread.started`; with bundled `gpt-5.4`, the second paid attempt completed first turn and exact same-thread resume but the pinned public JSONL supplied no model/effort facts, so the live node failed before its remaining assertions; the locally passing remediation pairs absence of the pinned public reroute signal with a strictly confined per-thread rollout's resolved request selection, exact lifecycle, and append-only prefix witness, but still needs a live rerun |
-| Claude Code | 2.1.215 | 2.1.215 | executable/schema handoff and one exact schema-correction retry passed two non-model local-endpoint probes without AJV strict warnings; the first managed paid attempt received HTTP 401, then the rotated dedicated token authenticated in the second attempt; that review returned an `LGTM` shape accepted by the old JSON Schema but rejected by the local semantic validator, so the schema and prompt now encode the same verdict invariants and still need a live rerun |
-| Namespace/runtime | user/PID/IPC/UTS/network namespaces, full tmpfs, PID 1 supervisor | required | target-host suite passed |
+| Codex CLI | 0.144.6 | 0.144.6 | passed; non-model probes plus paid first/resume turns proved exact-ID continuity, requested model/effort evidence, Git-less cwd/add-dir policy, fixed-manager/inner-Bubblewrap composition, workspace-write/no-network/control denial, and instruction isolation |
+| Claude Code | 2.1.215 | 2.1.215 | passed; private account-file authentication, exact model/effort diagnostic binding, closed review wrapper, remote nested-`anyOf` acceptance, retry ceilings, tool isolation, and managed-boundary attestation all passed |
+| Namespace/runtime | user/PID/IPC/UTS/network namespaces, full tmpfs, PID 1 supervisor | required | passed; user-service validation/Git/critic boundaries and fixed system-manager author boundary proved resource limits, cleanup, AppArmor-preserving inner sandbox composition, process isolation, and complete export |
 
-The repository was clean at implementation start. `PLAN.md` remains the `plan-v1.0` content at
-`6b16d5601b1aad7689d18cbd3802c9244c68444f`, with SHA-256
-`bebccf00360b38e4285f7d06bbaa1e5a3af5c4e0d692b183d1f6a905c67825eb`; it was not edited. The two
-dedicated credential stores are provisioned and passed their local structural production-parser
-checks; no ambient CLI home was imported. The replacement Claude token authenticated during the
-second qualification. The reviewed root managed-Claude boundary is installed and passed production
-inspection plus a fake-token, no-network initialization probe. Across two explicit
-authorizations, the first qualification stopped before Codex resume and the second reached Claude
-plus both Codex turns but failed its two final contracts. No live capability receipt exists.
+`PLAN.md` remains the explicit unfrozen `plan-v1.1` successor. The immutable `plan-v1.0` tag at
+`6b16d5601b1aad7689d18cbd3802c9244c68444f` is unchanged. The standard Codex and Claude CLI file
+logins were reused through the private default profile without printing secret content, a setup
+token, or an `agent-loop auth` import step. The reviewed managed-Claude boundary and fixed author
+broker are installed and qualified. A private schema-v3 receipt now exists for the exact qualified
+binding; it does not freeze the specification or replace repository change control.
 
 ## Phase checklist
 
-- [ ] Phase 1: canonical subject runtime — manifest, confined filesystem, hardened Git reader,
-  policy, Git-less materialization, and diagnostic projection pass their pytest coverage. The phase
-  is not declared complete because the required Ruff and strict-mypy gates could not run on this
-  host.
-- [ ] Phase 2: containment prototype — the sole Bubblewrap plus transient-systemd backend passes all
-  22 `host`-marked tests, including resource stress, process isolation, network denial, and cleanup.
-  The phase is not declared complete because the required formatting/lint/type gates could not run.
-- [ ] Phase 3: fake agents and deterministic control plane — configurable executable fakes cover
-  the required mutation/process families, credential refresh and mid-refresh crash, Claude
-  verdict/protocol/retry families, delayed completion, successful final-round revision, and exact
-  repeat/stall behavior. Fine-grained schema cases are additionally enforced compositionally by the
-  local total parser/schema tests. The phase is not declared complete because the required Ruff and
-  strict-mypy gates could not run.
-- [ ] Phase 4: pinned real-CLI integration — both adapters, exact argv/config parsing, non-model
-  Codex probes, pinned-Claude canonical-schema compatibility, and the receipt gate are implemented;
-  the second combined qualification reached both paid smoke-test nodes and all three intended
-  model turns but exposed one Claude schema/semantic mismatch and one Codex selection-evidence gap.
-  Both remediations now pass the complete local matrices and their non-model CLI probes; acceptance
-  8/33/49/65/66 still requires the nodes to pass in one newly authorized combined host/live pytest
-  session.
-- [ ] Phase 5: serial loop and usability — `run`, `status`, and `show`, strict configuration,
-  confirmation, artifacts, production receipt enforcement, and wheel metadata are covered with
-  deterministic adapters. The reviewed wheel installed successfully into a fresh pipx virtual
-  environment and all three entry points parsed; production model execution remains unavailable
-  until Phase 4 mints its receipt.
+- [x] Phase 1: canonical subject runtime — the ignore-independent manifest, confined filesystem,
+  hardened Git reader, policy, Git-less materialization, and diagnostic projection passed their
+  current-tree unit, integration, adversarial, and host coverage.
+- [x] Phase 2: containment runtime — validation/Git/critic user-service boundaries and the fixed
+  administrator-installed author broker passed protocol, provenance, resource, cleanup, complete
+  export, process-isolation, and real inner-Codex-sandbox qualification.
+- [x] Phase 3: fake agents and deterministic control plane — mutation/process, credential
+  bootstrap/refresh/crash recovery, verdict/protocol/retry, deadline, cap, stall, and hostile-data
+  families passed in the final automated suite.
+- [x] Phase 4: pinned real-CLI integration — the installed qualifier proved exact Codex first/resume
+  behavior, Claude account-file review, model/effort evidence, remote review-wrapper compatibility,
+  managed-boundary attestation, and every one of the 18 receipt-bound gates in one clean run.
+- [x] Phase 5: serial loop and usability — `run`, `status`, `show`, `auth`, `qualify`, dry-run,
+  strict configuration, confirmation, artifacts, receipt enforcement, wheel packaging, one-time
+  administrator installation, and normal no-extra-auth UX all have passing evidence.
 
-The implementation paths are present, but `plan-v1.0` remains incomplete and unqualified under its
-frozen definition of done. Static-analysis gates and live-dependent clauses remain outstanding.
+The implementation is qualified on the pinned host. The specification remains intentionally
+unfrozen only until its separate repository change-control and immutable-tag steps complete.
 
 ## Acceptance-test traceability
 
@@ -83,7 +75,7 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 5 | Private Git-derived tree | `tests/integration/test_git_source.py::test_005_006_040_private_git_derived_manifest_and_source_immutability` | passed |
 | 6 | No staging/raw Git | `tests/integration/test_sandbox_init.py::test_006_git_staging_and_history_fail_in_gitless_materialization` (both `git add` and `git log`) plus `tests/integration/test_git_source.py::test_005_006_040_private_git_derived_manifest_and_source_immutability` | passed |
 | 7 | Protected instructions | `tests/integration/test_manifest_policy.py` (`test_007_*`) and `tests/integration/test_codex_client.py::test_007_explicit_instruction_opt_in_relaxes_only_profile_prevention_layer` | passed |
-| 8 | Network split | `tests/host/test_network_boundary.py::test_008_network_split_for_no_network_role` plus the two live Codex/Claude nodes below | blocked |
+| 8 | Network split | `tests/host/test_network_boundary.py::test_008_network_split_for_no_network_role` plus the installed Codex and Claude qualification probes | passed |
 | 9 | Full-tmpfs export | `tests/host/test_sandbox.py` (`test_009_*`) and `tests/integration/test_sandbox_init.py::test_009_materialize_run_cleanup_then_complete_export` | passed |
 | 10 | Tmpfs/resource bounds | all eight `test_010_*` cases in `tests/host/test_limits.py` | passed |
 | 11 | Patched Bubblewrap | `tests/host/test_platform.py::test_011_patched_bubblewrap` and `tests/unit/test_sandbox.py::test_011_bubblewrap_probe_rejects_setuid_unexpected_hash_and_vulnerable_revision` | passed |
@@ -105,10 +97,10 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 27 | Blocked review | `tests/integration/test_runner.py::test_027_blocked_review_stops_without_another_author_turn` | passed |
 | 28 | Failed-validation incoherence | `tests/integration/test_runner.py::test_028_lgtm_with_failed_validation_is_rejected_by_real_semantics` | passed |
 | 29 | Descendant cleanup | both `test_029_*` cases in `tests/host/test_service_cleanup.py` and `tests/integration/test_sandbox_init.py::test_029_setsid_descendant_is_killed_and_reaped_before_export` | passed |
-| 30 | Process introspection | all four `test_030_*` cases in `tests/host/test_process_isolation.py` | passed |
+| 30 | Process introspection | all four `test_030_*` cases in `tests/host/test_process_isolation.py`, the `NSpid` normalization regressions in `tests/unit/test_qualification.py`, and the installed author probe's exact visible-process/ancestry checks | passed |
 | 31 | Sanitized Codex home | all `test_031_*` cases in `tests/integration/test_codex_client.py` | passed |
-| 32 | Codex auth isolation | all `test_032_*` cases in `tests/integration/test_credentials.py`; the generated-command read/environment clause is also asserted by the still-nonpassing live `test_033_065_066_*` node, whose second attempt reached both turns before failing on absent public model/effort facts | partial; live blocked |
-| 33 | Custom profile | `tests/real_cli/test_live_codex_acceptance.py::test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation`; the second attempt completed the first and resumed calls but stopped at the selection-evidence assertion before the node's remaining profile assertions, and the local private-rollout remediation has not run live | blocked |
+| 32 | Codex auth isolation | deterministic credential/barrier tests plus the installed first/resume command probes proved the transaction credential absent from model-command environment/output and `/control/codex-home/auth.json` unreadable | passed |
+| 33 | Custom profile | pinned profile parsing/negative tests plus installed first/resume probes proved bounded workspace writes, inert read-only `.git` guard, no network, and control/artifact denials through the fixed manager and inner Bubblewrap | passed |
 | 34 | Explicit session routing | both `test_034_*` cases in `tests/integration/test_codex_client.py` | passed |
 | 35 | No interrupted resume | `tests/integration/test_runner.py::test_035_interruption_preserves_finish_evidence_and_new_run_starts_fresh` | passed |
 | 36 | Credential crash recovery | all `test_036_*` cases in `tests/integration/test_credentials.py` | passed |
@@ -124,10 +116,10 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 46 | Special files | all `test_046_*` cases in `tests/adversarial/test_filesystem.py` | passed |
 | 47 | Arbitrary path bytes | `tests/unit/test_manifests.py::test_047_arbitrary_path_bytes_round_trip_losslessly` and all `test_047_*` cases in `tests/adversarial/test_openat2.py` | passed |
 | 48 | Critic isolation | `tests/integration/test_claude_client.py::test_048_critic_invocation_is_tool_disabled_and_fresh` and `tests/integration/test_runtime_adapters.py::test_048_claude_adapter_uses_empty_subject_bundle_stdin_and_dedicated_mounts` | passed |
-| 49 | Managed Claude boundary | `tests/unit/test_claude_managed_policy.py` proves the closed policy/helper contract and child-environment attestation behavior; `tests/integration/test_runtime_adapters.py` and `tests/integration/test_workflow.py` prove immutable mount, receipt, and production propagation; the first live attempt returned HTTP 401, while the second authenticated but its review failed local semantics before the node's managed-child assertions; the local schema/prompt remediation has not run live | partial; live blocked |
+| 49 | Managed Claude boundary | deterministic closed-policy/helper tests plus the installed paid critic proved the exact root-owned closure, account-file path, process set, tool denial, child-environment scrub, and the helper's full literal or pinned exact `[REDACTED]` attestation marker | passed |
 | 50 | Hostile Claude project config | `tests/integration/test_claude_client.py::test_050_hostile_claude_project_config_is_not_in_environment_or_cwd` | passed |
-| 51 | Retry budget | all `test_051_*` cases in `tests/integration/test_claude_client.py` prove exact environment settings, bounded schema retry, and typed exhaustion; the two process-local pinned-CLI probes prove canonical-schema handoff and that a whitespace-invalid `BLOCKED` result causes exactly one correction request before a canonical success, without AJV strict warnings; pinned `CLAUDE_CODE_MAX_RETRIES=2` API-failure retry behavior remains unproved | partial; live API-retry behavior unproved |
-| 52 | Schema semantics | all `test_052_*` cases in `tests/unit/test_schemas.py`, the schema-document contradiction/parity cases, and both separately run non-model pinned-Claude schema probes passed; the operational and packaged schema plus critic prompt encode the local validator's exact cross-verdict invariants, including a non-whitespace BLOCKED reason | passed |
+| 51 | Retry budget | deterministic process-local pinned-CLI probes proved one structured correction, local contradiction without undeclared retry, exactly one initial API attempt plus two API retries, no retry watchdog, and typed exhaustion; the installed critic used the same bound configuration | passed |
+| 52 | Schema semantics | Draft-07 schema parity/contradiction tests and the installed remote call proved the closed `structured_output.review` wrapper with nested `anyOf`; independent local validation rejected invalid verdict, field, range, and cross-field combinations | passed |
 | 53 | Bundle budgets | `tests/unit/test_prompts.py::test_053_bundle_budgets`, `test_053_changed_file_limit_withholds_the_complete_semantic_delta`, `test_053_findings_limit_fails_before_bundle_construction`, `test_053_task_field_limit_fails_before_bundle_construction`, and `test_053_byte_and_estimated_input_limits_are_independent` cover file, finding, field, byte, estimated-token, and output-reserve limits | passed |
 | 54 | Review limitation | `tests/unit/test_prompts.py::test_054_review_limitation_recorded` and `tests/unit/test_prompts.py::test_054_configured_context_obeys_sensitive_path_rules` | passed |
 | 55 | Hostile return path | `tests/adversarial/test_prompts.py::test_055_hostile_return_path` | passed |
@@ -139,23 +131,27 @@ frozen definition of done. Static-analysis gates and live-dependent clauses rema
 | 61 | Source isolation | `tests/integration/test_git_source.py::test_061_dirty_staged_untracked_and_ignored_checkout_state_is_excluded` | passed |
 | 62 | No publication | `tests/integration/test_runner.py::test_062_runner_has_no_publication_side_effect_and_prompts_prohibit_it` | passed |
 | 63 | Stable exits | `tests/unit/test_errors.py::test_063_stable_exits` exhaustively compares every `StopReason` member with its documented stable category | passed |
-| 64 | Model record | `tests/integration/test_runner.py::test_064_exact_requested_model_and_effort_must_match_observed_facts` and `tests/unit/test_schema_documents.py::test_064_run_record_contains_requested_and_observed_models_effort_usage_and_cost` passed; because pinned Codex public JSONL omits selection facts, the adapter now rejects the pinned public reroute signal, confined-reads the exact thread's private rollout, validates its frozen item set and task lifecycle, requires an append-only prior prefix plus exactly one new turn on resume, and matches its resolved model/effort to the request; all added regressions passed | passed |
-| 65 | Git-less first turn and resume | `tests/real_cli/test_live_codex_acceptance.py::test_033_065_066_live_profile_gitless_exact_resume_and_marker_isolation`; the second attempt completed both model calls, returned the expected response markers, and resumed the exact thread, but the node then failed on absent public selection facts before the local private-rollout remediation | blocked |
-| 66 | Project-instruction isolation | `tests/real_cli/test_codex_cli.py::test_066_pinned_prompt_input_probe_ignores_additional_root_instructions` passed; the second combined first/resume attempt stopped at selection evidence before its final marker/profile-isolation assertions, so the combined node remains blocked | blocked |
-| 67 | Auth refresh persistence and serialization | both `test_067_*` cases in `tests/integration/test_credentials.py` plus `tests/integration/test_runtime_adapters.py::test_067_external_fake_refresh_is_reconciled_before_adapter_returns` | passed |
+| 64 | Model record | bounded rollout/API-diagnostic parsers, mismatch regressions, and the installed first/resume/review sequence bound requested and client-observed model/effort values without treating them as server attestation | passed |
+| 65 | Git-less first turn and resume | installed paid first/resume calls used one exact thread through the fixed manager with the same empty cwd, `/workspace` add-dir, outside-Git flag, approval/profile policy, and successful exact command evidence | passed |
+| 66 | Project-instruction isolation | non-model prompt-input probes and installed hostile-marker first/resume turns proved project instruction files and every pinned system-skill/extension surface absent from the effective control context | passed |
+| 67 | Auth refresh persistence and serialization | final deterministic account-file coverage proved global lock order, validation, atomic refresh reconciliation, pair-transition recovery, disposable source probes, generation barriers, and concurrent-run serialization; the installed qualification exercised the combined transaction | passed |
 | 68 | Withheld semantic delta | `tests/unit/test_prompts.py` (`test_068_*`) and both counterfactual `test_068_*` cases in `tests/integration/test_runner.py` | passed |
 | 69 | Validation-log exfiltration | `tests/adversarial/test_declassify.py::test_069_validation_log_exfiltration` and the exact/split/base64/lowercase-hex/uppercase-hex parameterizations of `tests/integration/test_runner.py::test_069_secret_forms_never_cross_validation_to_either_agent` | passed |
 | 70 | Diagnostic patch correctness | `tests/unit/test_diagnostic_patch.py::test_070_projection_exactly_covers_all_manifest_change_shapes_and_hashes` | passed |
-| 71 | Transient-service lifecycle | `tests/host/test_service.py::test_071_transient_service_lifecycle` | passed |
-| 72 | Claude automation token | all `test_072_*` cases in `tests/integration/test_credentials.py` and `tests/integration/test_runtime_adapters.py::test_072_claude_token_encoding_cannot_enter_retained_control_output`; the rotated token authenticated in the second live attempt, but real managed-child scrubbing is asserted only after the still-unreached assertions in live gate 49 | partial; live blocked |
+| 71 | Transient-service lifecycle | user-service lifecycle tests and the installed qualification proved declared cleanup/resource behavior for validation, Git, critic, and the distinct fixed author-manager job | passed |
+| 72 | Claude account-auth isolation | deterministic refresh/artifact coverage and the installed paid critic proved only the private `.credentials.json` transaction under private `CLAUDE_CONFIG_DIR`, `HOME=/nonexistent`, no normal-path token/API-key environment state, child scrubbing, and no credential output | passed |
+| 73 | Codex control-context isolation | parser/marker guards plus installed first/resume turns proved all five pinned system skills and plugin/app/goal/personality/collaboration surfaces and associated tools absent | passed |
+| 74 | Pinned selection-evidence adapters | malformed/drift/reroute regressions plus one installed real first/resume/review sequence proved the exact descriptor-confined Codex rollout and bounded Claude API-diagnostic parsers | passed |
+| 75 | Live receipt lifecycle | deterministic binding/privacy/expiry/invalidation tests plus the sole installed issuer minted the private schema-v3 receipt only after every one of the 18 required gates passed | passed |
+| 76 | Fixed author-manager and inner sandbox composition | installed-artifact provenance, peer/descriptor policy, direct-manager denial, privilege drop, AppArmor-preserving namespace, exact inner Bubblewrap ancestry/profile, cleanup, and real paid first/resume turns all passed | passed |
+| 77 | Lazy bootstrap and smooth authentication | deterministic coverage proved absent-default import, local-only status, no routine auth command, strictly newer vendor-login adoption, stale rollback prevention, paired crash recovery, and interruption-safe source probes; installed qualification reused the default pair without project auth setup | passed |
+| 78 | Claude wire/local contract | deterministic/local probes and the installed paid critic proved the exact canonical Draft-07 plain-object root, required `review` wrapper, nested `anyOf`, no `if`/`then`, remote acceptance, top-level `structured_output.review`, diagnostic binding, and stricter independent local rejection | passed |
 
-The matrix therefore records 64 passed contracts, four partial contracts, and four blocked
-contracts. Partial and blocked contracts are not completion.
-
-The blocked and partial rows have deterministic adapter and negative-policy coverage. Their
-unproved portions require real trusted-control model egress, generated-command behavior from the
-pinned Codex service, the real managed Claude child, or (for acceptance 51) a pinned-Claude retry
-behavior probe. Local simulation is not treated as completion.
+All 78 rows now have passing evidence. That result combines the **814 passed, 8 skipped** final
+automated suite with the installed qualifier's 18 successful target-host/live gates. The skipped
+nodes are recorded honestly and are not counted as passing evidence. Conversely, the live receipt
+attests only its named 18 gates and is not, by itself, evidence for the other 60 contracts or for
+static analysis, packaging quality, or target-project correctness.
 
 ## Implementation decisions within non-normative freedom
 
@@ -163,9 +159,11 @@ behavior probe. Local simulation is not treated as completion.
   versioned JSON documents at runtime; the development suite additionally validates each document
   against its declared dialect. The critic contract is Draft 7 because the pinned Claude 2.1.215
   CLI rejects a Draft 2020-12 metaschema before launch; all other packaged schemas remain Draft
-  2020-12. The critic schema and prompt now encode the same LGTM/REVISE/BLOCKED cross-field
-  invariants as the total semantic parser, so an incoherent verdict is eligible for Claude's one
-  bounded schema-correction attempt instead of reaching local semantic validation.
+  2020-12. The remote-compatible document has a closed plain-object root containing only a required
+  `review` property; that value uses the nested LGTM/REVISE/BLOCKED `anyOf`. The runner accepts only
+  the exact `envelope["structured_output"]["review"]` path, revalidates the complete wrapper, and
+  applies independent stricter local semantics to the review. An incoherent verdict can receive
+  only Claude's one declared wire-schema correction; a wire-valid local contradiction is terminal.
 - Pinned Codex 0.144.6 does not publish positive model/effort facts in its public exec JSONL. The
   adapter rejects that stream's exact server-reroute error signal, then binds the successful thread
   to one private per-thread rollout. Descriptor-confined, byte/event-bounded traversal accepts only
@@ -179,6 +177,16 @@ behavior probe. Local simulation is not treated as completion.
 - Git source authority, reviewed mount roots, and retained closure traversal are descriptor-bound.
   Component-wise `openat2`/no-follow checks, stable metadata witnesses, exact-fd Bubblewrap binds,
   and private read-only closure snapshots close pathname replacement races before launch.
+- An inherited procfs across nested PID namespaces can enumerate numeric directories with
+  ancestor-namespace labels. The author qualification takes stable before/after `/proc` snapshots,
+  maps every entry by the final `NSpid` component, remaps `PPid` labels through that closed table,
+  and fails on missing, duplicate, or unstable mappings. This normalizes identity without widening
+  the exact visible-process or ancestry allowlist.
+- Pinned Claude 2.1.215 may rewrite the reviewed SessionStart helper's assignment-shaped `scrub=1`
+  suffix to the exact `[REDACTED]` spelling in verbose stderr. The attestation parser admits only the
+  full literal marker or that one exact redacted marker. The root-owned helper/policy closure and
+  static helper probe establish the condition behind the marker; prefixes and alternative
+  redaction spellings are rejected.
 - The runtime provenance digest covers Python source only and rejects executable shadow payloads;
   harmless `__pycache__/*.pyc` files and install location do not alter the receipt binding. The
   sandbox imports the reviewed runtime through a source-only loader.
@@ -191,91 +199,95 @@ behavior probe. Local simulation is not treated as completion.
   durable run metadata contains only content-free pending markers. Configuration, task, source, and
   structural fingerprints are released only after the initial and post-preparation credential
   generations are scanned; a colliding fingerprint is withheld from operator output.
-- Every newly observed Codex credential generation is checked against generated configuration and
-  the complete retained tree before the transaction is accepted. Final reconciliation repeats that
-  barrier over all historical/current generations before credential completion.
+- Every newly observed Codex or Claude account-file credential generation is checked against
+  generated configuration and the complete retained tree before the transaction is accepted. Final
+  reconciliation repeats that barrier over all historical/current generations before credential
+  completion. When the default stores are wholly absent, the first ordinary preflight may import
+  only the authorized operator's active standard CLI credential files. A later valid default pair
+  may adopt only a strictly newer parser-valid generation from those exact paths after probing it in
+  disposable private state; stale/equal/unsafe/failed probes never replace durable state. Partial or
+  invalid managed state is never implicitly repaired. The pinned status probes establish local CLI
+  acceptance, not remote token validity.
 - Credential-tainted or unclassifiable evidence is whole-run withheld. A zero-byte per-run latch in
   a private, structurally separate control directory is persisted before erasure; a reentrant
   process lock plus per-run `flock` serializes the latch with artifact and production retained-tree
   operations. Reopen replays interrupted erasure and refuses access. A transient marker failure is
   retried after best-effort erasure; even persistent marker failure still attempts complete erasure
   and returns a fatal credential-refresh error.
-- The version-2 live receipt names all eleven target-host/live acceptance gates and can be written
-  only from a single clean pytest session. Its per-session ledger rejects skips, xfails, xpasses,
-  failures, missing phases, stale observations, selector mismatch, or changed install/runtime or
-  managed Claude policy/helper closure. Version-1 receipts are not accepted or migrated.
+- The schema-v3 live receipt names all 18 receipt-bound gates. Only the installed, version-matched
+  `agent-loop qualify --live --accept-paid` command may issue a production receipt; repository
+  pytest sessions are diagnostic and cannot mint one. The installed qualifier rejects failures,
+  timeouts, incomplete phases, stale observations, selector mismatch, or changed author-manager,
+  install/runtime, or managed-Claude closure before issuance. Older receipts and incomplete
+  schema-v3 attempts are not accepted or migrated.
 - Rename diagnostics are deterministic delete/create pairs with matching kind, mode, and content
   identity; canonical manifests do not claim Git rename history.
 
-## Remaining prerequisites, implementation work, and exact reproduction
+## Completed evidence and requalification
 
-The receipt-bound live proof requires deliberate operator action:
+The qualified artifact is the wheel named below as bound by the root-owned install record and
+private receipt:
 
-1. Provision the two private credential identifiers and exact install roots described in `README.md`.
-2. Have an administrator install and dry-check the reviewed Claude managed policy/helper exactly as
-   described in `README.md`; this does not load credentials or authorize model traffic.
-3. Review the displayed accounts, exact models/efforts, expected two Codex model calls, and one
-   Claude CLI invocation. The Claude invocation may make one initial model request plus at most one
-   schema-correction model request; its separate `CLAUDE_CODE_MAX_RETRIES=2` API retry budget can
-   retry API attempts. Review the timeouts and worst-case cost, then set both
-   `AGENT_LOOP_CONFIRM_PAID_*` variables.
-4. Export every exact selector in the README and run this single command on the frozen host:
-
-   ```bash
-   python3.14 -m pytest -q tests/host tests/real_cli
-   ```
-
-Running individual live nodes is useful for diagnosis but cannot mint a production receipt. The
-combined session must have zero skips, xfails, xpasses, failures, or missing required phases. A
-receipt is necessary for production execution, but is not evidence for the acceptance-51 retry
-clause and does not complete the static-analysis work.
-
-Ruff, mypy, Hypothesis, and pytest-cov are not installed on this host. The importable `build`
-namespace also lacks its executable `build.__main__` frontend. No package was fetched to add any of
-them; the offline wheel proof instead used the installed pinned setuptools through pip with index,
-cache, build isolation, and dependency resolution disabled. This demonstrates a local wheel build,
-but it is not an artifact-hash lock for the build dependency. The resulting reviewed wheel was
-subsequently installed into a fresh pipx virtual environment without dependency resolution. Once
-the development tools are provided through a reviewed dependency workflow, run:
-
-```bash
-ruff format --check .
-ruff check .
-mypy src tests
+```text
+dist/agent_loop-1.1.0-py3-none-any.whl
 ```
 
-The executable-fake Phase 3 matrix covers the required behavior families; fine-grained invalid
-Claude schema fields are enforced compositionally by the same local parser/schema layer rather than
-claimed as one fake process per rule. Acceptance 51's pinned schema-correction retry is now proven
-against a process-local endpoint; its separate API-failure retry behavior remains unproved. The
-fresh pipx wheel installation exposes and parses exactly `run`, `status`, and `show`, and its
-installed Python-source closure matches the reviewed source closure.
+This document deliberately does not embed that wheel's digest: it is itself packaged into the
+wheel, so doing so would be a self-referential and immediately stale claim. The installer records
+the exact digest in `/etc/agent-loop/author-service-install.txt`, and the qualifier binds it into the
+private receipt. That exact wheel was installed into both the unprivileged CLI environment and the
+reviewed root-owned author-service closure before the successful paid qualification. The sole
+production issuer is the installed command:
+
+```bash
+agent-loop qualify --live --accept-paid
+```
+
+Repository-local pytest remains useful for deterministic, adversarial, host, and diagnostic
+real-CLI coverage, but it cannot mint a production receipt. The installed qualifier reruns the
+production probes and binding checks without requiring the repository `tests/` tree.
+
+The current private receipt has these non-secret structural facts; inspect the live private file
+for its exact digest and timestamps rather than copying volatile values into packaged documentation:
+
+```text
+path     ${XDG_STATE_HOME:-$HOME/.local/state}/agent-loop/capabilities/live-v3.json
+schema   3
+mode     0600
+gates    18
+validity at most seven days
+```
+
+Re-run the installed qualifier after expiry or whenever any receipt-bound host, executable,
+runtime, author-manager, managed-Claude, credential identifier, model, or effort fact changes. It
+must again complete every gate; a partial or failed attempt never becomes a receipt. Review the
+printed paid scope before passing `--accept-paid`.
+
+Normal runs require no project-specific authentication command. Existing standard file-backed
+Codex and Claude sign-ins are reused automatically. If a vendor status command reports sign-out, or
+an actual model request returns the runner's exact vendor-session-ended diagnostic, run only that
+vendor's native login once and rerun the original command. Do not run an `agent-loop auth` import
+step. Generic process/probe failures are not evidence that reauthentication is needed. The optional
+`agent-loop auth status` and `auth init --repair` commands remain advanced local diagnostics and
+integrity recovery, respectively.
+
+The implementation has no remaining qualification prerequisite on this pinned host. Freezing the
+specification is a distinct repository-governance action: open and review the required issue/PR,
+merge the final document, and create the annotated immutable `plan-v1.1` tag. Until then the correct
+description is **implementation qualified; specification unfrozen**.
 
 ## Check log
 
 | Date | Command | Result |
 |---|---|---|
-| 2026-07-19 | environment/version/provenance inspection | passed; exact values recorded above |
-| 2026-07-20 | `python3.14 -m pytest --collect-only -q -p no:cacheprovider` | passed; 674 tests collected |
-| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider -m 'not host and not real_cli'` | passed; 646 passed, 28 deselected |
-| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider -m host` | passed; 22 passed, 652 deselected |
-| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider tests/host` | passed; 21 passed |
-| 2026-07-19 | `AGENT_LOOP_ALLOW_LIVE=1 AGENT_LOOP_CODEX_CREDENTIAL_ID=nonmodel-probe AGENT_LOOP_CODEX_PATH=/home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js python3.14 -m pytest -q tests/real_cli/test_codex_cli.py::test_pinned_codex_non_model_version_and_help_capabilities tests/real_cli/test_codex_cli.py::test_066_pinned_prompt_input_probe_ignores_additional_root_instructions` | passed; 2 passed |
-| 2026-07-20 | selected process-local pinned-Claude canonical-schema and one-correction-retry probes | passed; 2 passed with dummy local credentials and no external network or model call |
-| 2026-07-20 | `python3.14 -m pytest -q -p no:cacheprovider -m 'not real_cli'` | passed; 668 passed, 6 deselected |
-| 2026-07-20 | `python3.14 -m compileall -q src tests` | passed |
-| 2026-07-20 | explicitly authorized combined `tests/host tests/real_cli` qualification | failed; 23 passed and 3 failed: host preflight followed a mutable Claude launcher at 2.1.216, Claude returned HTTP 401, and Codex exited 1 after `thread.started`; resume was not reached and no receipt was written |
-| 2026-07-20 | second explicitly authorized combined `tests/host tests/real_cli` qualification | failed; 24 passed and 2 failed: the managed Claude call authenticated but returned an `LGTM` shape accepted by the old schema and rejected by local verdict semantics; Codex first turn and exact same-thread resume both completed, but the pinned public JSONL omitted model/effort selection facts; no receipt was written |
-| 2026-07-20 | pinned Codex 0.144.6 `debug models --bundled` in an isolated empty home | passed without credentials, network refresh, or model traffic; `gpt-5.4-codex` is absent and `gpt-5.4` is listed with `high` reasoning support |
-| 2026-07-20 | `bash support/managed-claude-boundary/install.sh --check` | passed; static helper and exact policy/input probes only, with no `sudo`, system write, credential access, or model call |
-| 2026-07-20 | `bash support/managed-claude-boundary/install.sh` | passed with operator-entered sudo authentication; installed exact root-owned policy/helper modes `0444`/`0555`, and production inspection passed |
-| 2026-07-20 | installed `SandboxExecutor` fake-token Claude `--init-only` probe under the validation role | passed; managed marker observed, credential canary absent, empty subject unchanged, namespace/cgroup cleanup proven, and network namespace unshared |
-| 2026-07-19 | `python3.14 -m build` | blocked; installed namespace has no `build.__main__`; no install attempted |
-| 2026-07-20 | `PIP_NO_INDEX=1 python3.14 -m pip wheel . --no-cache-dir --no-build-isolation --no-deps --wheel-dir dist` | passed; wheel built offline and packaged the frozen plan, status, schemas, managed-boundary sources, and console entry point |
-| 2026-07-20 | `PIP_NO_INDEX=1 pipx install dist/agent_loop-1.0.0-py3-none-any.whl --python /usr/bin/python3.14` plus installed/source closure and subcommand checks | passed in a fresh Python 3.14.4 pipx virtual environment; installed Python-source closure matched source and exactly `run`, `status`, `show` parsed |
+| 2026-07-19–20 | predecessor deterministic, host, non-model CLI, wheel, and two combined paid attempts | useful historical repair evidence only; no receipt was written and the successor topology supersedes the aggregate counts |
+| 2026-07-21 | current Codex and Claude standard-login status checks | passed without exposing secret content; Codex uses ChatGPT file auth and Claude uses an active claude.ai subscription login |
+| 2026-07-21 | pinned Claude 2.1.215 `auth status --json` with only a private copy of `.credentials.json`, private `CLAUDE_CONFIG_DIR`, and nonexistent home | passed without a model call; supports the no-setup-token default path |
+| 2026-07-21 | explicitly authorized successor combined qualification | failed closed; Claude returned pre-inference HTTP 400 for conditional schema keywords and Codex inner Bubblewrap was denied beneath the former outer user namespace; no receipt was written |
+| 2026-07-21 | final current-tree automated suite | **814 passed, 8 skipped**; skips were not counted as passes, and live evidence came from the installed qualifier |
+| 2026-07-21 | reviewed wheel build and installed-boundary replacement | passed; the exact wheel digest was recorded in the root-owned install record and receipt binding |
+| 2026-07-21 | installed `agent-loop qualify --live --accept-paid` | passed all 18 target-host/live gates: fixed broker plus inner Codex sandbox first/resume, `NSpid`-normalized ancestry, account isolation, exact full-or-`[REDACTED]` managed-Claude attestation, retry/selection evidence, and remote plain-root/nested-`anyOf` review wrapper |
+| 2026-07-21 | schema-v3 receipt | minted mode `0600` with an at-most-seven-day validity window and exact artifact/host binding |
 
-The credentialed Codex/Claude smoke nodes were attempted twice but did not pass. The replacement
-Claude token authenticated and the corrected Codex selector completed both turns in the second
-attempt. The reviewed remediations now pass every local matrix and their non-model pinned-CLI
-probes; blocked live status remains intentional until another combined run is explicitly
-authorized and passes.
+The correct status is **implementation qualified on the pinned host; `plan-v1.1` remains unfrozen
+pending its issue/PR/review/merge/tag workflow**.

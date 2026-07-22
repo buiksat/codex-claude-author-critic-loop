@@ -80,26 +80,20 @@ def main() -> int:
         sys.stdout.write("[]")
         return 0
     if scenario == "duplicate-envelope-key":
-        sys.stdout.write(
-            '{"type":"result","structured_output":{},"structured_output":{}}'
-        )
+        sys.stdout.write('{"type":"result","structured_output":{},"structured_output":{}}')
         return 0
     if scenario == "missing":
         sys.stdout.write(json.dumps({"type": "result", "result": "LGTM"}))
         return 0
     if scenario == "error-envelope":
-        sys.stdout.write(
-            json.dumps({"type": "error", "is_error": True, "message": "fake"})
-        )
+        sys.stdout.write(json.dumps({"type": "error", "is_error": True, "message": "fake"}))
         return 1
     if scenario == "is-error-result":
         sys.stdout.write(json.dumps({"type": "result", "is_error": True}))
         return 1
     if scenario == "max_turns":
         sys.stdout.write(
-            json.dumps(
-                {"type": "result", "subtype": "error_max_turns", "is_error": True}
-            )
+            json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True})
         )
         return 1
     if scenario == "structured_retries":
@@ -115,7 +109,11 @@ def main() -> int:
         return 1
     sys.stdout.write(
         json.dumps(
-            {"type": "result", "structured_output": review, "total_cost_usd": 0.0}
+            {
+                "type": "result",
+                "structured_output": {"review": review},
+                "total_cost_usd": 0.0,
+            }
         )
     )
     return 0

@@ -62,11 +62,9 @@ def test_047_arbitrary_path_bytes_round_trip_losslessly() -> None:
 def test_manifest_entries_are_immutable_and_require_raw_bytes() -> None:
     entry = regular(b"file", b"value")
     with pytest.raises(FrozenInstanceError):
-        setattr(entry, "path", b"changed")
+        entry.__setattr__("path", b"changed")
     with pytest.raises(TypeError, match="bytes"):
-        ManifestEntry.regular(
-            cast(bytes, "file"), size=1, blob_sha256=sha256_hex(b"x")
-        )
+        ManifestEntry.regular(cast(bytes, "file"), size=1, blob_sha256=sha256_hex(b"x"))
 
 
 @pytest.mark.parametrize("path", [b"", b"/absolute", b"a//b", b"a/./b", b"a/../b", b"nul\0x"])

@@ -76,9 +76,7 @@ def test_002_ignore_rule_change_cannot_hide_existing_or_new_candidate_entry() ->
 def test_003_discard_only_output_is_recorded_but_not_authoritative_or_next_round() -> None:
     blobs = MemoryBlobs()
     base = scan([(b"src/app.py", b"old")], blobs)
-    candidate = scan(
-        [(b"src/app.py", b"new"), (b"build/cache.bin", b"generated")], blobs
-    )
+    candidate = scan([(b"src/app.py", b"new"), (b"build/cache.bin", b"generated")], blobs)
     policy = PathPolicy(discard_only_patterns=(b"build/**",))
 
     result = reconcile_candidate(base, candidate, policy)

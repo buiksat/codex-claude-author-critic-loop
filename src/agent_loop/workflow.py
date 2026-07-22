@@ -31,21 +31,30 @@ from .capabilities import (
     ManagedClaudeBoundaryCapabilityBinding,
     verify_live_capability_receipt,
 )
+from .claude_client import (
+    CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+    CLAUDE_REAUTHENTICATION_NEXT_ACTION,
+)
 from .claude_managed_policy import (
     ManagedClaudeBoundary,
     inspect_managed_claude_boundary,
 )
+from .codex_auth_status import probe_codex_file_auth_status
 from .codex_client import (
+    CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+    CODEX_REAUTHENTICATION_NEXT_ACTION,
     SanitizedCodexConfig,
-    build_codex_parent_environment,
     install_sanitized_codex_config,
 )
 from .config import ProjectConfig, load_project_config, project_config_from_mapping
 from .constants import DEFAULT_MAX_FIELD_BYTES, Limits
 from .credentials import (
     CodexCredentialTransaction,
+    CombinedCredentialTransaction,
+    auto_enroll_default_cli_credentials,
+    build_claude_parent_environment,
+    claude_cli_credential_secret_values,
     codex_credential_root,
-    load_claude_setup_token,
     xdg_state_home,
 )
 from .declassify import KnownSecret, raw_log_contains_known_secret
@@ -83,11 +92,11 @@ from .runner import (
     _manifest_metadata_contains_known_secret,
 )
 from .runtime_adapters import (
-    SandboxExecution,
-    SandboxExecutor,
     SandboxedClaudeCriticAdapter,
     SandboxedCodexAuthorAdapter,
     SandboxedValidationAdapter,
+    SandboxExecution,
+    SandboxExecutor,
     ValidationCheck,
 )
 from .sandbox import SandboxMount, SandboxRole
@@ -120,7 +129,11 @@ _AUTH_TOKEN_KEYS = {
     "refresh_token",
     "account_id",
 }
-_CODEX_HOME_NAMES = {"auth.json", "config.toml", "sessions"}
+_GENERIC_CREDENTIAL_NEXT_ACTION = (
+    "Check `codex login status` and `claude auth status`. If either vendor says you are "
+    "signed out, run that vendor's normal login command once, then rerun this command. "
+    "No `agent-loop auth` command is required for the default profile."
+)
 
 
 class Closeable(Protocol):
@@ -444,7 +457,7 @@ def _load_base_configuration(path: Path) -> ProjectConfig:
             StopReason.SANDBOX_SETUP_FAILURE,
             "the explicitly selected project configuration does not exist",
         ) from None
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         raise fail(
             StopReason.SANDBOX_SETUP_FAILURE,
             "the project configuration is missing, unsafe, or invalid",
@@ -506,7 +519,7 @@ def resolve_run_configuration(args: argparse.Namespace) -> RunConfiguration:
 
     try:
         merged = project_config_from_mapping(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise fail(
             StopReason.SANDBOX_SETUP_FAILURE,
             "the merged project and CLI run configuration is invalid",
@@ -540,19 +553,35 @@ def resolve_run_configuration(args: argparse.Namespace) -> RunConfiguration:
         or _MODEL.fullmatch(merged.critic_model) is None
     ):
         raise fail(StopReason.SANDBOX_SETUP_FAILURE, "model selections are not safe exact IDs")
-    if _EFFORT.fullmatch(merged.author_effort) is None or _EFFORT.fullmatch(
-        merged.critic_effort
-    ) is None:
+    if (
+        _EFFORT.fullmatch(merged.author_effort) is None
+        or _EFFORT.fullmatch(merged.critic_effort) is None
+    ):
         raise fail(StopReason.SANDBOX_SETUP_FAILURE, "effort selections are not safe exact IDs")
+
+    codex_argument = _optional_argument(args, "codex_executable")
+    claude_argument = _optional_argument(args, "claude_executable")
+    if codex_argument is None or claude_argument is None:
+        # Import lazily because the installed qualification workflow reuses
+        # this module's strict parsers. Discovery is credential-free and
+        # accepts only the exact pinned CLI versions; production preflight
+        # still binds resolved paths and closure hashes to the live receipt.
+        from .qualification import discover_pinned_cli_executables
+
+        discovered_codex, discovered_claude = discover_pinned_cli_executables()
+        if codex_argument is None:
+            codex_argument = discovered_codex
+        if claude_argument is None:
+            claude_argument = discovered_claude
 
     return RunConfiguration(
         merged,
         _normalized_executable(
-            _optional_argument(args, "codex_executable"),
+            codex_argument,
             name="Codex executable",
         ),
         _normalized_executable(
-            _optional_argument(args, "claude_executable"),
+            claude_argument,
             name="Claude executable",
         ),
     )
@@ -561,11 +590,7 @@ def resolve_run_configuration(args: argparse.Namespace) -> RunConfiguration:
 def read_task(path: Path, *, max_bytes: int = DEFAULT_MAX_FIELD_BYTES) -> str:
     """Read one stable, confined, bounded regular task file."""
 
-    if (
-        not isinstance(max_bytes, int)
-        or isinstance(max_bytes, bool)
-        or max_bytes <= 0
-    ):
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
         raise ValueError("task byte limit must be positive")
     try:
         data = read_confined_absolute_file(path, max_bytes=max_bytes)
@@ -579,7 +604,7 @@ def read_task(path: Path, *, max_bytes: int = DEFAULT_MAX_FIELD_BYTES) -> str:
             StopReason.SANDBOX_SETUP_FAILURE,
             detail,
         ) from None
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         raise fail(
             StopReason.SANDBOX_SETUP_FAILURE,
             "task input is missing, unsafe, or inaccessible",
@@ -654,7 +679,7 @@ def _parsed_codex_file_auth(data: bytes) -> dict[str, object] | None:
             parse_float=reject_number,
             parse_int=reject_number,
         )
-    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+    except UnicodeDecodeError, ValueError, RecursionError, MemoryError:
         return None
     if not isinstance(value, dict) or set(value) != _AUTH_TOP_LEVEL:
         return None
@@ -738,7 +763,7 @@ def _read_codex_auth(codex_home: Path) -> dict[str, object]:
         ):
             raise ValueError("unstable auth file")
         parsed = _parsed_codex_file_auth(data)
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         raise fail(
             StopReason.CREDENTIAL_REFRESH_FAILURE,
             "transactional Codex credential could not be scanned safely",
@@ -799,6 +824,35 @@ def _transaction_codex_known_secrets(
     for generation in transaction.auth_generations:
         values.extend(_codex_known_secrets_from_auth(generation))
     return tuple(dict.fromkeys(values))
+
+
+def _transaction_claude_known_secrets(
+    transaction: CombinedCredentialTransaction,
+) -> tuple[KnownSecret, ...]:
+    transaction.claude.capture_candidate_generation()
+    values: list[KnownSecret] = []
+    for generation in transaction.claude_auth_generations:
+        try:
+            secrets = claude_cli_credential_secret_values(generation)
+        except ValueError:
+            raise fail(
+                StopReason.CREDENTIAL_REFRESH_FAILURE,
+                "transactional Claude credential generation failed strict parsing",
+            ) from None
+        values.extend(
+            KnownSecret(f"claude-{name}", value)
+            for name, value in zip(("access-token", "refresh-token"), secrets, strict=True)
+        )
+    return tuple(dict.fromkeys(values))
+
+
+def _transaction_all_known_secrets(
+    transaction: WorkflowCredentialTransaction,
+) -> tuple[KnownSecret, ...]:
+    codex = _transaction_codex_known_secrets(transaction)
+    if isinstance(transaction, CombinedCredentialTransaction):
+        return tuple(dict.fromkeys((*codex, *_transaction_claude_known_secrets(transaction))))
+    return codex
 
 
 def _codex_artifact_evidence_barrier(
@@ -887,14 +941,60 @@ def _codex_artifact_evidence_barrier(
     return classify
 
 
+def _claude_artifact_evidence_barrier(
+    state_home: Path,
+) -> Callable[[str, tuple[bytes, ...]], None]:
+    """Scrub all Claude login generations before a refreshed file is promoted."""
+
+    def classify(run_id: str, generations: tuple[bytes, ...]) -> None:
+        replay_withholding_only = not generations
+        try:
+            secrets = tuple(
+                dict.fromkeys(
+                    KnownSecret(f"claude-{name}", value)
+                    for generation in generations
+                    for name, value in zip(
+                        ("access-token", "refresh-token"),
+                        claude_cli_credential_secret_values(generation),
+                        strict=True,
+                    )
+                )
+            )
+        except ValueError:
+            raise fail(
+                StopReason.CREDENTIAL_REFRESH_FAILURE,
+                "pending Claude credential generation failed strict parsing",
+            ) from None
+        run_root = state_home / "agent-loop" / "runs" / run_id
+        try:
+            info = os.lstat(run_root)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise fail(
+                StopReason.CREDENTIAL_REFRESH_FAILURE,
+                "pending run evidence could not be inspected before Claude credential promotion",
+            ) from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise fail(
+                StopReason.CREDENTIAL_REFRESH_FAILURE,
+                "pending run evidence root is not a private directory",
+            )
+        with ArtifactStore.open(run_root) as retained:
+            if retained.content_withheld_due_to_secret:
+                retained.withhold_all_content()
+            elif not replay_withholding_only:
+                retained.scrub_known_secrets(secrets)
+
+    return classify
+
+
 def _environment_json(
     environment: EnvironmentReport | Mapping[str, object],
 ) -> dict[str, object]:
     if isinstance(environment, EnvironmentReport):
         return environment.to_json_obj()
-    if not isinstance(environment, Mapping) or any(
-        not isinstance(key, str) for key in environment
-    ):
+    if not isinstance(environment, Mapping) or any(not isinstance(key, str) for key in environment):
         raise TypeError("preflight environment evidence must be a string-keyed mapping")
     return dict(environment)
 
@@ -969,9 +1069,10 @@ def _derive_reviewed_install(
         elif name == "codex" and resolved.name == "codex.js" and resolved.parent.name == "bin":
             source = resolved.parent.parent
             package = json.loads((source / "package.json").read_text(encoding="utf-8"))
-            if not isinstance(package, dict) or (
-                package.get("name"), package.get("version")
-            ) != ("@openai/codex", environment.codex.version.removeprefix("codex-cli ")):
+            if not isinstance(package, dict) or (package.get("name"), package.get("version")) != (
+                "@openai/codex",
+                environment.codex.version.removeprefix("codex-cli "),
+            ):
                 raise ValueError("Codex package identity does not match preflight")
             target = "/opt/agent-loop-tools/codex-package"
             executable = target + "/bin/codex.js"
@@ -980,7 +1081,7 @@ def _derive_reviewed_install(
         if any(_paths_overlap(source, root) for root in roots):
             raise ValueError("CLI package closure overlaps runner state")
         closure = closure_sha256(source)
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         raise fail(
             StopReason.SANDBOX_SETUP_FAILURE,
             f"reviewed {name} install closure is unsafe or unsupported",
@@ -1016,7 +1117,7 @@ def _reviewed_toolchain_mount(path: str, preparation: RunPreparation) -> Sandbox
         ):
             raise ValueError("toolchain overlaps source or runner state")
         closure = closure_sha256(selected)
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         raise fail(
             StopReason.SANDBOX_SETUP_FAILURE,
             "a reviewed toolchain mount is missing, unsafe, special, or overlaps private state",
@@ -1026,7 +1127,12 @@ def _reviewed_toolchain_mount(path: str, preparation: RunPreparation) -> Sandbox
             StopReason.SANDBOX_SETUP_FAILURE,
             "reviewed toolchain mounts cannot traverse symbolic links",
         )
-    return SandboxMount(path, path, read_only=True, closure_sha256=closure)
+    return SandboxMount(
+        path,
+        f"/opt/agent-loop-toolchains/{closure}",
+        read_only=True,
+        closure_sha256=closure,
+    )
 
 
 def _codex_status_probe(
@@ -1034,41 +1140,65 @@ def _codex_status_probe(
     install: ReviewedInstall,
     codex_home: Path,
 ) -> bool:
-    """Run the pinned non-model auth command inside the service/sandbox boundary."""
+    """Run the pinned non-model auth command with disposable helper scratch."""
+
+    return probe_codex_file_auth_status(
+        executor,
+        install_mount=install.mount,
+        executable=install.executable,
+        codex_home=codex_home,
+    )
+
+
+def _claude_status_probe(
+    executor: SandboxExecutor,
+    install: ReviewedInstall,
+    claude_home: Path,
+    managed_boundary: ManagedClaudeBoundary,
+) -> bool:
+    """Prove the pinned transactional Claude login before any model call."""
 
     try:
         execution = executor.execute(
-            role=SandboxRole.AUTHOR,
+            role=SandboxRole.CRITIC,
             manifest=SubjectManifest.empty(),
             argv=(
                 install.executable,
-                "-c",
-                'cli_auth_credentials_store="file"',
-                "login",
+                "--safe-mode",
+                "auth",
                 "status",
+                "--json",
             ),
-            environment=build_codex_parent_environment(),
-            cwd="/runtime/author-cwd",
+            environment=build_claude_parent_environment(
+                None,
+                config_dir="/control/claude-home",
+                tmp_dir="/runtime/critic-tmp",
+            ),
+            cwd="/runtime/critic-cwd",
             timeout_seconds=15,
             mounts=(
                 install.mount,
                 SandboxMount(
-                    os.fspath(codex_home),
-                    "/control/codex-home",
+                    os.fspath(claude_home),
+                    "/control/claude-home",
                     read_only=False,
                 ),
+                managed_boundary.policy_mount,
+                managed_boundary.helper_mount,
             ),
             output_max_bytes=64 * 1024,
         )
-        names = set(os.listdir(codex_home))
-    except (AgentLoopError, OSError, TypeError, ValueError):
+        value = json.loads(execution.result.process.stdout)
+    except AgentLoopError, OSError, TypeError, ValueError, json.JSONDecodeError:
         return False
     process = execution.result.process
     return bool(
         process.returncode == 0
         and not process.timed_out
         and not process.output_limited
-        and names <= _CODEX_HOME_NAMES
+        and isinstance(value, dict)
+        and value.get("loggedIn") is True
+        and value.get("authMethod") == "claude.ai"
     )
 
 
@@ -1191,9 +1321,7 @@ def _safe_outer_attempt_streams(
                 True,
             )
         validation_fields = tuple(
-            field
-            for record in batch_records
-            for field in (record.stdout, record.stderr)
+            field for record in batch_records for field in (record.stdout, record.stderr)
         ) + tuple(
             field.encode("utf-8", "strict")
             for check in batch_request.checks
@@ -1277,9 +1405,7 @@ def _attempt_sink(
         if role is SandboxRole.VALIDATION:
             validation_content_withheld = candidate_content_withheld
             try:
-                batch_request = parse_validation_batch_request(
-                    execution.request.stdin_bytes
-                )
+                batch_request = parse_validation_batch_request(execution.request.stdin_bytes)
                 batch_records = parse_validation_batch_result(
                     process.stdout,
                     expected_checks=len(batch_request.checks),
@@ -1293,10 +1419,7 @@ def _attempt_sink(
                     for record in batch_records
                     for field in (record.stdout, record.stderr)
                 ) or _json_tree_contains_known_secret(
-                    tuple(
-                        (check.check_id, check.command)
-                        for check in batch_request.checks
-                    ),
+                    tuple((check.check_id, check.command) for check in batch_request.checks),
                     current_secrets,
                 )
         elif role in {SandboxRole.AUTHOR, SandboxRole.CRITIC}:
@@ -1340,9 +1463,7 @@ def _attempt_sink(
             else preparation.configuration.project.limits.max_agent_output_bytes
         )
         content_withheld = (
-            validation_content_withheld
-            or control_content_withheld
-            or credential_error
+            validation_content_withheld or control_content_withheld or credential_error
         )
         if content_withheld:
             retained_stdout, retained_stderr, streams_truncated = (
@@ -1370,18 +1491,14 @@ def _attempt_sink(
         )
         preparation.artifacts.write_bytes(
             f"{prefix}/{role.value}-attempt.candidate-subject.json",
-            b""
-            if content_withheld
-            else execution.result.candidate.to_json_bytes(),
+            b"" if content_withheld else execution.result.candidate.to_json_bytes(),
         )
         preparation.artifacts.write_json(
             f"{prefix}/{role.value}-attempt.json",
             {
                 "role": role.value,
                 "attempt": attempt_number,
-                "round": (
-                    None if role is SandboxRole.VALIDATION else attempt_number
-                ),
+                "round": (None if role is SandboxRole.VALIDATION else attempt_number),
                 "returncode": process.returncode,
                 "timed_out": process.timed_out,
                 "output_limited": process.output_limited,
@@ -1392,9 +1509,7 @@ def _attempt_sink(
                 "streams_truncated": streams_truncated,
                 "content_withheld": content_withheld,
                 "retention_failure_reason": (
-                    StopReason.CREDENTIAL_REFRESH_FAILURE.value
-                    if credential_error
-                    else None
+                    StopReason.CREDENTIAL_REFRESH_FAILURE.value if credential_error else None
                 ),
                 "namespace_empty": execution.result.cleanup.namespace_empty,
                 "terminated_pids": execution.result.cleanup.terminated_pids,
@@ -1404,14 +1519,10 @@ def _attempt_sink(
                 "service_timed_out": execution.service.process.timed_out,
                 "service_output_limited": execution.service.process.output_limited,
                 "input_subject_fingerprint": (
-                    None
-                    if input_content_withheld
-                    else execution.request.manifest.fingerprint
+                    None if input_content_withheld else execution.request.manifest.fingerprint
                 ),
                 "candidate_subject_fingerprint": (
-                    None
-                    if candidate_content_withheld
-                    else execution.result.candidate.fingerprint
+                    None if candidate_content_withheld else execution.result.candidate.fingerprint
                 ),
             },
         )
@@ -1437,9 +1548,7 @@ def _service_attempt_sink(
         service: ServiceResult,
         completed_at: float,
     ) -> None:
-        prefix = (
-            f"artifacts/sandbox-service-attempts/{attempt_number:03d}-{role.value}"
-        )
+        prefix = f"artifacts/sandbox-service-attempts/{attempt_number:03d}-{role.value}"
         preparation.artifacts.ensure_directory(prefix)
         stream_cap = (
             preparation.configuration.project.limits.max_raw_log_bytes
@@ -1602,7 +1711,7 @@ class ProductionWorkflowBackend:
         if selected is None:
             try:
                 selected = inspect_managed_claude_boundary()
-            except (OSError, TypeError, ValueError):
+            except OSError, TypeError, ValueError:
                 raise fail(
                     StopReason.GITLESS_INVOCATION_PROBE_FAILED,
                     "the fixed administrator-managed Claude boundary is absent or unsafe",
@@ -1621,7 +1730,7 @@ class ProductionWorkflowBackend:
                     raise ValueError(
                         "managed Claude boundary overlaps source or private runner state"
                     )
-        except (OSError, TypeError, ValueError):
+        except OSError, TypeError, ValueError:
             raise fail(
                 StopReason.GITLESS_INVOCATION_PROBE_FAILED,
                 "the fixed administrator-managed Claude boundary is absent, unsafe, or overlaps "
@@ -1634,35 +1743,50 @@ class ProductionWorkflowBackend:
     def acquire_codex_credential(
         self,
         preparation: RunPreparation,
-    ) -> CodexCredentialTransaction:
+    ) -> CombinedCredentialTransaction:
         config = preparation.configuration.project
         environment = preparation.environment
         if not isinstance(environment, EnvironmentReport):
             raise TypeError("production preflight did not return EnvironmentReport")
         assert config.codex_credential_id is not None
-        install = self._install(preparation, name="codex")
+        assert config.claude_credential_id is not None
+        codex_install = self._install(preparation, name="codex")
+        claude_install = self._install(preparation, name="claude")
+        managed_boundary = self._claude_boundary(preparation)
         executor = SandboxExecutor(
             preparation.blobs,
             limits=config.limits,
             clock=self.clock,
         )
-        transaction = CodexCredentialTransaction.acquire(
+        return CombinedCredentialTransaction.acquire(
             config.codex_credential_id,
+            config.claude_credential_id,
             preparation.run_id,
-            auth_parser=parse_codex_file_auth,
-            auth_probe=lambda home: _codex_status_probe(executor, install, home),
+            codex_auth_parser=parse_codex_file_auth,
+            codex_auth_probe=lambda home: _codex_status_probe(
+                executor,
+                codex_install,
+                home,
+            ),
+            claude_auth_probe=lambda home: _claude_status_probe(
+                executor,
+                claude_install,
+                home,
+                managed_boundary,
+            ),
             state_home=preparation.state_home,
-            evidence_barrier=_codex_artifact_evidence_barrier(
+            codex_evidence_barrier=_codex_artifact_evidence_barrier(
                 preparation.state_home,
                 config.codex_credential_id,
             ),
+            claude_evidence_barrier=_claude_artifact_evidence_barrier(preparation.state_home),
         )
-        return transaction
 
     def load_claude_token(self, preparation: RunPreparation) -> str:
-        credential_id = preparation.configuration.project.claude_credential_id
-        assert credential_id is not None
-        return load_claude_setup_token(credential_id, state_home=preparation.state_home)
+        del preparation
+        # Subscription login is supplied by the combined transaction's
+        # private CLAUDE_CONFIG_DIR, not copied into the process environment.
+        return ""
 
     def known_secrets(
         self,
@@ -1671,8 +1795,16 @@ class ProductionWorkflowBackend:
         claude_token: str,
     ) -> tuple[KnownSecret, ...]:
         del preparation
+        if isinstance(transaction, CombinedCredentialTransaction):
+            if claude_token:
+                raise fail(
+                    StopReason.CREDENTIAL_REFRESH_FAILURE,
+                    "production Claude login unexpectedly selected an environment token",
+                )
+            return _transaction_all_known_secrets(transaction)
         secrets = list(_transaction_codex_known_secrets(transaction))
-        secrets.append(KnownSecret("claude-setup-token", claude_token.encode("utf-8")))
+        if claude_token:
+            secrets.append(KnownSecret("claude-setup-token", claude_token.encode("utf-8")))
         return tuple(secrets)
 
     def prepare_codex_credential(
@@ -1681,7 +1813,12 @@ class ProductionWorkflowBackend:
         transaction: WorkflowCredentialTransaction,
         known_secrets: tuple[KnownSecret, ...],
     ) -> tuple[KnownSecret, ...]:
-        if not isinstance(transaction, CodexCredentialTransaction):
+        codex_transaction = (
+            transaction.codex
+            if isinstance(transaction, CombinedCredentialTransaction)
+            else transaction
+        )
+        if not isinstance(codex_transaction, CodexCredentialTransaction):
             raise fail(
                 StopReason.CREDENTIAL_REFRESH_FAILURE,
                 "production credential transaction has an unexpected implementation",
@@ -1718,19 +1855,17 @@ class ProductionWorkflowBackend:
                 authenticated = _codex_status_probe(
                     executor,
                     install,
-                    transaction.codex_home,
+                    codex_transaction.codex_home,
                 )
             finally:
-                transaction.capture_candidate_generation()
+                codex_transaction.capture_candidate_generation()
             if not authenticated:
                 raise fail(
                     StopReason.CREDENTIAL_REFRESH_FAILURE,
                     "transactional Codex file authentication failed its status probe",
                 )
             refreshed = tuple(
-                dict.fromkeys(
-                    (*known_secrets, *_transaction_codex_known_secrets(transaction))
-                )
+                dict.fromkeys((*known_secrets, *_transaction_all_known_secrets(transaction)))
             )
             if raw_log_contains_known_secret(rendered, refreshed):
                 raise fail(
@@ -1742,7 +1877,7 @@ class ProductionWorkflowBackend:
             # Preparation is deliberately config-free.  The workflow first
             # rescans every task/source/metadata surface against the refreshed
             # generation, then calls install_codex_configuration.
-            transaction.remove_candidate_config()
+            codex_transaction.remove_candidate_config()
 
     def install_codex_configuration(
         self,
@@ -1750,7 +1885,12 @@ class ProductionWorkflowBackend:
         transaction: WorkflowCredentialTransaction,
         known_secrets: tuple[KnownSecret, ...],
     ) -> None:
-        if not isinstance(transaction, CodexCredentialTransaction):
+        codex_transaction = (
+            transaction.codex
+            if isinstance(transaction, CombinedCredentialTransaction)
+            else transaction
+        )
+        if not isinstance(codex_transaction, CodexCredentialTransaction):
             raise fail(
                 StopReason.CREDENTIAL_REFRESH_FAILURE,
                 "production credential transaction has an unexpected implementation",
@@ -1771,11 +1911,11 @@ class ProductionWorkflowBackend:
                     StopReason.CREDENTIAL_REFRESH_FAILURE,
                     "generated Codex configuration contained dedicated credential bytes",
                 )
-            install_sanitized_codex_config(transaction, generated)
+            install_sanitized_codex_config(codex_transaction, generated)
             installed = True
         finally:
             if not installed:
-                transaction.remove_candidate_config()
+                codex_transaction.remove_candidate_config()
 
     def build_runtime(
         self,
@@ -1808,8 +1948,14 @@ class ProductionWorkflowBackend:
                         "credential-tainted evidence remains permanently withheld",
                     )
                 try:
-                    discovered = _transaction_codex_known_secrets(transaction)
-                except (AgentLoopError, UnicodeError, ValueError):
+                    if isinstance(transaction, CombinedCredentialTransaction):
+                        # A fresh critic may refresh .credentials.json.  Promote
+                        # it under the account lock only after its transaction
+                        # evidence barrier classifies all generations, and
+                        # before any review attempt can be accepted or retained.
+                        transaction.reconcile_after_turn()
+                    discovered = _transaction_all_known_secrets(transaction)
+                except AgentLoopError, UnicodeError, ValueError:
                     preparation.artifacts.withhold_all_content()
                     raise fail(
                         StopReason.CREDENTIAL_REFRESH_FAILURE,
@@ -1860,8 +2006,21 @@ class ProductionWorkflowBackend:
             codex_install = self._install(preparation, name="codex")
             claude_install = self._install(preparation, name="claude")
             managed_boundary = self._claude_boundary(preparation)
-            preparation.artifacts.ensure_directory("control/claude-home")
-            claude_config = preparation.run_root / "control" / "claude-home"
+            codex_transaction: WorkflowCredentialTransaction
+            if isinstance(transaction, CombinedCredentialTransaction):
+                if claude_token:
+                    raise fail(
+                        StopReason.CREDENTIAL_REFRESH_FAILURE,
+                        "transactional Claude login cannot be combined with an environment token",
+                    )
+                claude_config = transaction.claude_home
+                selected_claude_token: str | None = None
+                codex_transaction = transaction
+            else:
+                preparation.artifacts.ensure_directory("control/claude-home")
+                claude_config = preparation.run_root / "control" / "claude-home"
+                selected_claude_token = claude_token
+                codex_transaction = transaction
             validator = SandboxedValidationAdapter(
                 executor,
                 tuple(
@@ -1880,7 +2039,7 @@ class ProductionWorkflowBackend:
             )
             author = SandboxedCodexAuthorAdapter(
                 executor,
-                transaction,
+                codex_transaction,
                 install_mount=codex_install.mount,
                 executable=codex_install.executable,
                 toolchain_mounts=toolchain,
@@ -1894,7 +2053,7 @@ class ProductionWorkflowBackend:
             )
             critic = SandboxedClaudeCriticAdapter(
                 executor,
-                claude_token,
+                selected_claude_token,
                 install_mount=claude_install.mount,
                 executable=claude_install.executable,
                 config_dir=claude_config,
@@ -1902,12 +2061,17 @@ class ProductionWorkflowBackend:
                 timeout_seconds=config.critic_timeout_seconds,
                 model=config.critic_model,
                 effort=config.critic_effort,
+                secret_refresh=(
+                    current_secrets
+                    if isinstance(transaction, CombinedCredentialTransaction)
+                    else None
+                ),
                 attempt_sink=sink,
                 clock=self.clock,
             )
         except AgentLoopError:
             raise
-        except (OSError, TypeError, ValueError):
+        except OSError, TypeError, ValueError:
             raise fail(
                 StopReason.SANDBOX_SETUP_FAILURE,
                 "production runtime adapter construction failed",
@@ -1937,6 +2101,15 @@ class ProductionWorkflowBackend:
         assert config.critic_model is not None
         assert config.critic_effort is not None
         try:
+            # This imports only an absent default pair.  Existing defaults are
+            # reconciled later, under the profile/provider locks and status
+            # probes, where a strictly newer vendor re-login can be staged.
+            auto_enroll_default_cli_credentials(
+                codex_credential_id=config.codex_credential_id,
+                claude_credential_id=config.claude_credential_id,
+                codex_auth_parser=parse_codex_file_auth,
+                state_home=preparation.state_home,
+            )
             binding = LiveCapabilityBinding.from_environment_report(
                 environment,
                 codex_credential_id=config.codex_credential_id,
@@ -1961,7 +2134,7 @@ class ProductionWorkflowBackend:
                 preparation.state_home / CAPABILITY_RECEIPT_RELATIVE_PATH,
                 binding,
             )
-        except (CapabilityReceiptError, OSError, TypeError, ValueError):
+        except CapabilityReceiptError, OSError, TypeError, ValueError:
             raise fail(
                 StopReason.GITLESS_INVOCATION_PROBE_FAILED,
                 "no fresh private live-gate receipt matches the exact preflight binding",
@@ -2047,7 +2220,7 @@ def _confirmation_document(
         "credential_adapters": {
             "codex": "locked ChatGPT-managed file auth",
             "codex_credential_id": config.codex_credential_id,
-            "claude": "dedicated setup token",
+            "claude": "locked refresh-persistent Claude Code login",
             "claude_credential_id": config.claude_credential_id,
         },
         "models": {
@@ -2173,6 +2346,38 @@ def _result_from_exception(
     )
 
 
+def _credential_failure_operator_fields(
+    detail: str,
+    known_secrets: tuple[KnownSecret, ...],
+) -> tuple[dict[str, str], bool]:
+    """Declassify only fixed credential guidance for terminal JSON output."""
+
+    if not isinstance(detail, str):
+        raise TypeError("credential failure detail must be a string")
+    if not isinstance(known_secrets, tuple) or not all(
+        isinstance(secret, KnownSecret) for secret in known_secrets
+    ):
+        raise TypeError("known_secrets must be a tuple of KnownSecret values")
+    if detail == CODEX_REAUTHENTICATION_FAILURE_DETAIL:
+        fields = {
+            "detail": CODEX_REAUTHENTICATION_FAILURE_DETAIL,
+            "next_action": CODEX_REAUTHENTICATION_NEXT_ACTION,
+        }
+    elif detail == CLAUDE_REAUTHENTICATION_FAILURE_DETAIL:
+        fields = {
+            "detail": CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
+            "next_action": CLAUDE_REAUTHENTICATION_NEXT_ACTION,
+        }
+    else:
+        # Credential failures from other boundaries may carry details derived
+        # from hostile process output.  Never echo those details merely because
+        # they have the same broad stop reason.
+        fields = {"next_action": _GENERIC_CREDENTIAL_NEXT_ACTION}
+    if _json_tree_contains_known_secret(fields, known_secrets):
+        return {}, True
+    return fields, False
+
+
 class _ExistingBlobWitness:
     """Manifest builder sink that refuses to persist newly observed bytes."""
 
@@ -2195,11 +2400,7 @@ def _relative_directory_filesystem(
     *,
     create: bool,
 ) -> ConfinedFilesystem:
-    descriptor = (
-        root.mkdirs(destination)
-        if create
-        else root.open_directory(destination)
-    )
+    descriptor = root.mkdirs(destination) if create else root.open_directory(destination)
     try:
         return ConfinedFilesystem.from_fd(descriptor)
     finally:
@@ -2311,7 +2512,7 @@ class _AuthoritativeSubjectGuard:
                 StopReason.OUT_OF_BAND_CHANGE,
                 "authoritative subject witness cannot be verified",
             ) from None
-        except (OSError, TypeError, ValueError):
+        except OSError, TypeError, ValueError:
             raise fail(
                 StopReason.OUT_OF_BAND_CHANGE,
                 "authoritative subject witness cannot be verified",
@@ -2517,7 +2718,7 @@ def _precredential_execution_inputs(
         )
     try:
         state_home = xdg_state_home(state_home=state_home_argument)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise fail(
             StopReason.SANDBOX_SETUP_FAILURE,
             "state home must be a normalized absolute non-root path",
@@ -2537,6 +2738,125 @@ def _precredential_execution_inputs(
     return configuration, task_path, task, state_home, source, run_id, run_root
 
 
+def _dry_run_document(
+    configuration: RunConfiguration,
+    source: Path,
+    state_home: Path,
+    snapshot: GitSourceSnapshot,
+    environment: EnvironmentReport | Mapping[str, object],
+) -> dict[str, object]:
+    """Render a no-credential, no-model preview of the resolved run contract.
+
+    A dry run deliberately stops before credential discovery/import, receipt
+    validation, baseline execution, artifact creation, or either model CLI.  It
+    proves that the static inputs, committed source, pinned host boundary, and
+    selected policy can be resolved without turning a preview into another
+    authentication ceremony.
+    """
+
+    config = configuration.project
+    regular_file_bytes = sum(
+        entry.size or 0 for entry in snapshot.manifest.entries if entry.kind is EntryKind.REGULAR
+    )
+    return {
+        "schema_version": 1,
+        "mode": "dry-run",
+        "spending_authorized": False,
+        "models_called": False,
+        "credentials_loaded_or_imported": False,
+        "artifacts_created": False,
+        "validation_executed": False,
+        "live_receipt_checked": False,
+        "source": {
+            "canonical_path": os.fspath(source),
+            "committed_revision": snapshot.revision,
+            "committed_tree_object_id": snapshot.tree_object_id,
+            "excluded_source_state": list(snapshot.warnings),
+            "subject_fingerprint": snapshot.manifest.fingerprint,
+            "subject_entries": len(snapshot.manifest.entries),
+            "regular_file_bytes": regular_file_bytes,
+        },
+        "state_home": os.fspath(state_home),
+        "environment": _environment_json(environment),
+        "configuration": _configuration_mapping(config),
+        "next_steps": {
+            "qualification": "agent-loop qualify --live --accept-paid",
+            "run": (
+                "repeat this command without --dry-run; add --yes only for deliberate automation"
+            ),
+            "authentication": (
+                "no auth command is normally needed; the real run reuses the existing default "
+                "Codex and Claude CLI file logins when its private default profile is absent"
+            ),
+        },
+    }
+
+
+def execute_dry_run(
+    args: argparse.Namespace,
+    *,
+    backend: WorkflowBackend | None = None,
+    io: WorkflowIO | None = None,
+) -> int:
+    """Resolve and inspect one run without credentials, validation, or spending."""
+
+    selected_backend = backend or ProductionWorkflowBackend()
+    selected_io = io or WorkflowIO()
+    (
+        configuration,
+        _task_path,
+        _task,
+        state_home,
+        source,
+        run_id,
+        _run_root,
+    ) = _precredential_execution_inputs(args, selected_backend)
+    source_lock: Closeable | None = None
+    pending: BaseException | None = None
+    try:
+        source_lock = selected_backend.acquire_source_lock(
+            source,
+            run_id,
+            state_home=state_home,
+        )
+        blobs = _PrecredentialBlobStore(configuration.project.limits)
+        environment = selected_backend.preflight(configuration)
+        snapshot = selected_backend.extract_source(
+            source,
+            blobs,
+            limits=configuration.project.limits,
+        )
+        verify_manifest_blobs(snapshot.manifest, blobs)
+        document = _dry_run_document(
+            configuration,
+            source,
+            state_home,
+            snapshot,
+            environment,
+        )
+        selected_io.write(
+            json.dumps(
+                document,
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+    except BaseException as exception:
+        pending = exception
+    finally:
+        if source_lock is not None:
+            try:
+                source_lock.close()
+            except BaseException as exception:
+                if pending is None:
+                    pending = exception
+    if pending is not None:
+        raise pending
+    return int(ExitCode.SUCCESS)
+
+
 def execute_run(
     args: argparse.Namespace,
     *,
@@ -2545,12 +2865,15 @@ def execute_run(
 ) -> int:
     """Execute one new non-resumable run and return its stable exit category."""
 
+    if bool(getattr(args, "dry_run", False)):
+        return execute_dry_run(args, backend=backend, io=io)
+
     selected_backend = backend or ProductionWorkflowBackend()
     selected_io = io or WorkflowIO()
     try:
         (
             configuration,
-            task_path,
+            _task_path,
             task,
             state_home,
             source,
@@ -2661,12 +2984,7 @@ def execute_run(
                 known_secrets,
             )
             result_subject_fingerprint_withheld = subject_withheld
-            if (
-                configuration_withheld
-                or metadata_withheld
-                or task_withheld
-                or subject_withheld
-            ):
+            if configuration_withheld or metadata_withheld or task_withheld or subject_withheld:
                 journal.task_input(task, content_withheld=task_withheld)
                 journal.subject_input(snapshot.manifest, content_withheld=subject_withheld)
                 artifacts.write_json(
@@ -2713,12 +3031,7 @@ def execute_run(
                     "content_withheld": configuration_withheld,
                 },
             )
-            if (
-                configuration_withheld
-                or metadata_withheld
-                or task_withheld
-                or subject_withheld
-            ):
+            if configuration_withheld or metadata_withheld or task_withheld or subject_withheld:
                 transaction.remove_candidate_config()
                 raise fail(
                     StopReason.CREDENTIAL_REFRESH_FAILURE,
@@ -2835,7 +3148,7 @@ def execute_run(
                 discovered = (
                     runtime_secret_provider()
                     if runtime_secret_provider is not None
-                    else _transaction_codex_known_secrets(transaction)
+                    else _transaction_all_known_secrets(transaction)
                 )
                 retained_known_secrets = tuple(
                     dict.fromkeys((*retained_known_secrets, *discovered))
@@ -2844,9 +3157,7 @@ def execute_run(
                     model=configuration.project.author_model,
                     effort=configuration.project.author_effort,
                     additional_workspace_denies=configuration.project.protected_paths,
-                    workspace_opt_ins=(
-                        configuration.project.protected_opt_in_paths
-                    ),
+                    workspace_opt_ins=(configuration.project.protected_opt_in_paths),
                     additional_host_denies=(os.fspath(preparation.run_root),),
                 ).render()
                 if raw_log_contains_known_secret(
@@ -2868,13 +3179,11 @@ def execute_run(
                 if runtime_secret_provider is not None:
                     try:
                         recovered_history = runtime_secret_provider()
-                    except (KeyboardInterrupt, Exception):
+                    except KeyboardInterrupt, Exception:
                         recovered_history = ()
                     else:
                         retained_known_secrets = tuple(
-                            dict.fromkeys(
-                                (*retained_known_secrets, *recovered_history)
-                            )
+                            dict.fromkeys((*retained_known_secrets, *recovered_history))
                         )
                 if not artifacts.content_withheld_due_to_secret:
                     artifacts.withhold_all_content()
@@ -2953,9 +3262,7 @@ def execute_run(
                     pending_exception = exception
         if artifacts is not None:
             try:
-                all_optional_output_withheld = (
-                    artifacts.content_withheld_due_to_secret
-                )
+                all_optional_output_withheld = artifacts.content_withheld_due_to_secret
             except BaseException as exception:
                 # If the durable latch cannot be inspected, release no optional
                 # operator output.  Preserve the inspection failure only when
@@ -2982,6 +3289,13 @@ def execute_run(
         "exit_code": int(result.exit_code),
         "rounds_completed": result.rounds_completed,
     }
+    terminal_guidance_withheld = False
+    if result.stop_reason is StopReason.CREDENTIAL_REFRESH_FAILURE:
+        credential_fields, terminal_guidance_withheld = _credential_failure_operator_fields(
+            result.detail,
+            retained_known_secrets,
+        )
+        output.update(credential_fields)
     run_id_withheld = all_optional_output_withheld or _json_tree_contains_known_secret(
         preparation.run_id,
         retained_known_secrets,
@@ -3004,7 +3318,7 @@ def execute_run(
         output["run_root"] = os.fspath(preparation.run_root)
     if not fingerprint_withheld:
         output["subject_fingerprint"] = result.subject.fingerprint
-    if run_id_withheld or run_root_withheld or fingerprint_withheld:
+    if run_id_withheld or run_root_withheld or fingerprint_withheld or terminal_guidance_withheld:
         output["operator_output_content_withheld"] = True
     selected_io.write(
         json.dumps(
@@ -3026,6 +3340,7 @@ __all__ = [
     "WorkflowBackend",
     "WorkflowCredentialTransaction",
     "WorkflowIO",
+    "execute_dry_run",
     "execute_run",
     "parse_codex_file_auth",
     "read_task",

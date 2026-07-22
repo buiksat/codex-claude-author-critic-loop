@@ -1,10 +1,10 @@
-"""Frozen support matrix and centrally reviewed version-1 limits."""
+"""Pinned support matrix and centrally reviewed successor limits."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-SPEC_VERSION = "plan-v1.0"
+SPEC_VERSION = "plan-v1.1"
 SUBJECT_SCHEMA_VERSION = 1
 RUN_SCHEMA_VERSION = 1
 SANDBOX_PROTOCOL_VERSION = 1
@@ -26,6 +26,14 @@ SUPPORTED_BWRAP_SHA256 = frozenset(
 SUPPORTED_CODEX_VERSION = "0.144.6"
 SUPPORTED_CLAUDE_VERSION = "2.1.215"
 
+# One reviewed default selection is shared by ordinary runs and the live
+# capability receipt.  Operators can still override these in project config,
+# but the zero-ceremony path stays exact and receipt-bindable.
+DEFAULT_AUTHOR_MODEL = "gpt-5.4"
+DEFAULT_AUTHOR_EFFORT = "high"
+DEFAULT_CRITIC_MODEL = "claude-opus-4-6"
+DEFAULT_CRITIC_EFFORT = "medium"
+
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 REGULAR_MODE = 0o100644
@@ -45,9 +53,7 @@ DEFAULT_RESERVED_OUTPUT_TOKENS = 8_192
 # Version 1 deliberately selects a conservative, model-independent review
 # context budget.  A model with a smaller observed context is rejected by the
 # capability gate; a larger context does not silently broaden this ceiling.
-DEFAULT_REVIEW_CONTEXT_TOKENS = (
-    DEFAULT_MAX_ESTIMATED_INPUT_TOKENS + DEFAULT_RESERVED_OUTPUT_TOKENS
-)
+DEFAULT_REVIEW_CONTEXT_TOKENS = DEFAULT_MAX_ESTIMATED_INPUT_TOKENS + DEFAULT_RESERVED_OUTPUT_TOKENS
 DEFAULT_MAX_FILES = 20_000
 DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SUBJECT_BYTES = 256 * 1024 * 1024
@@ -85,7 +91,7 @@ DEFAULT_PROTECTED_PATTERNS = (
 
 @dataclass(frozen=True, slots=True)
 class Limits:
-    """Recorded conservative limits selected within plan-v1.0 freedom."""
+    """Recorded conservative limits selected within plan-v1.1 freedom."""
 
     max_files: int = DEFAULT_MAX_FILES
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES

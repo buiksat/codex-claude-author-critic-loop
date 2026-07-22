@@ -9,7 +9,6 @@ import sys
 import time
 from pathlib import Path
 
-
 _REFRESHED_AUTH = {
     "auth_mode": "chatgpt",
     "OPENAI_API_KEY": None,

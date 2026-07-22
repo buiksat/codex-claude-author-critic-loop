@@ -8,9 +8,10 @@ import pytest
 from jsonschema import Draft7Validator, Draft202012Validator, ValidationError
 
 from agent_loop.artifacts import ArtifactStore
+from agent_loop.author_service import AuthorServiceProvenance
 from agent_loop.constants import SUPPORTED_BWRAP_SHA256
 from agent_loop.declassify import declassify_validation
-from agent_loop.errors import ExitCode, StopReason
+from agent_loop.errors import AgentLoopError, ExitCode, StopReason
 from agent_loop.manifests import SubjectManifest
 from agent_loop.models import ManifestEntry, sha256_hex
 from agent_loop.preflight import EnvironmentReport, TrustedExecutable
@@ -24,9 +25,13 @@ from agent_loop.runner import (
     ValidationTurn,
 )
 from agent_loop.sandbox import BubblewrapProvenance
-from agent_loop.schemas import CriticReview, Verdict, critic_schema_document
+from agent_loop.schemas import (
+    CriticReview,
+    Verdict,
+    critic_schema_document,
+    validate_critic_review,
+)
 from agent_loop.validation import CheckExecution, ValidationSummary, classify_validations
-
 
 SCHEMA_ROOT = Path(__file__).parents[2] / "schemas"
 
@@ -89,6 +94,25 @@ def environment_record() -> dict[str, object]:
         python_executable,
         codex,
         claude,
+        AuthorServiceProvenance(
+            protocol=1,
+            build_id="fixed-system-author-v1",
+            authorized_uid=1000,
+            socket_path="/run/agent-loop/author.sock",
+            socket_owner_uid=1000,
+            socket_mode=0o600,
+            socket_unit_sha256="1" * 64,
+            broker_unit_sha256="2" * 64,
+            socket_dropin_sha256="3" * 64,
+            config_sha256="4" * 64,
+            install_record_sha256="5" * 64,
+            runtime_closure_sha256="6" * 64,
+            wheel_sha256="7" * 64,
+            codex_closure_sha256="8" * 64,
+            effective_units_sha256="9" * 64,
+            package_version="1.1.0",
+            broker_probe=True,
+        ),
         True,
         True,
         True,
@@ -136,6 +160,45 @@ def test_packaged_critic_schema_matches_operational_schema() -> None:
     assert schema("critic-v1.schema.json") == critic_schema_document()
 
 
+def test_critic_schema_uses_api_compatible_top_level_object() -> None:
+    document = critic_schema_document()
+    assert document["type"] == "object"
+    assert document["additionalProperties"] is False
+    assert document["required"] == ["review"]
+    assert set(document).isdisjoint({"anyOf", "oneOf", "allOf", "if", "then"})
+    review = document["properties"]["review"]
+    assert isinstance(review, dict)
+    assert len(review["anyOf"]) == 3
+    assert {shape["properties"]["verdict"]["const"] for shape in review["anyOf"]} == {
+        "LGTM",
+        "REVISE",
+        "BLOCKED",
+    }
+    assert all(
+        shape["type"] == "object"
+        and shape["additionalProperties"] is False
+        and set(shape["required"])
+        == {
+            "schema_version",
+            "verdict",
+            "summary",
+            "blocked_reason",
+            "blocking_findings",
+            "non_blocking_findings",
+        }
+        for shape in review["anyOf"]
+    )
+
+    def keys(value: object) -> set[str]:
+        if isinstance(value, dict):
+            return set(value).union(*(keys(item) for item in value.values()))
+        if isinstance(value, list):
+            return set().union(*(keys(item) for item in value))
+        return set()
+
+    assert keys(document).isdisjoint({"if", "then"})
+
+
 def test_critic_draft_07_definition_reference_enforces_finding_contract() -> None:
     selected = Draft7Validator(critic_schema_document())
     finding: dict[str, object] = {
@@ -159,10 +222,10 @@ def test_critic_draft_07_definition_reference_enforces_finding_contract() -> Non
         "non_blocking_findings": [],
     }
 
-    selected.validate(review)
+    selected.validate({"review": review})
     del finding["required_fix"]
     with pytest.raises(ValidationError):
-        selected.validate(review)
+        selected.validate({"review": review})
 
 
 def _critic_finding() -> dict[str, object]:
@@ -217,11 +280,14 @@ def _critic_review(
         "blocked-finding",
     ),
 )
-def test_critic_draft_07_schema_rejects_cross_verdict_contradictions(
+def test_nested_wire_discriminator_rejects_cross_verdict_contradictions(
     review: dict[str, object],
 ) -> None:
     with pytest.raises(ValidationError):
-        Draft7Validator(critic_schema_document()).validate(review)
+        Draft7Validator(critic_schema_document()).validate({"review": review})
+    with pytest.raises(AgentLoopError) as captured:
+        validate_critic_review(review)
+    assert captured.value.reason is StopReason.INVALID_STRUCTURED_OUTPUT
 
 
 @pytest.mark.parametrize(
@@ -236,7 +302,7 @@ def test_critic_draft_07_schema_rejects_cross_verdict_contradictions(
 def test_critic_draft_07_schema_accepts_each_canonical_verdict_shape(
     review: dict[str, object],
 ) -> None:
-    Draft7Validator(critic_schema_document()).validate(review)
+    Draft7Validator(critic_schema_document()).validate({"review": review})
 
 
 def test_subject_schema_accepts_actual_regular_and_symlink_serializer_output() -> None:
@@ -356,10 +422,13 @@ def test_run_schema_tracks_actual_progressive_journal_and_rejects_unknowns(
         )
         bundle = ReviewBundle({}, b"{}", 1, "f" * 64)
         journal.critic(1, critic, bundle)
-        assert artifacts.read_bytes(
-            "artifacts/rounds/001/review-bundle.json",
-            max_bytes=1024,
-        ) == b"{}"
+        assert (
+            artifacts.read_bytes(
+                "artifacts/rounds/001/review-bundle.json",
+                max_bytes=1024,
+            )
+            == b"{}"
+        )
         selected.validate(artifacts.read_json("artifacts/run.json", max_bytes=1024 * 1024))
 
         result = LoopResult(
@@ -418,6 +487,7 @@ def test_precredential_failure_run_remains_schema_valid_and_withheld(
         )
         retained = artifacts.read_json("artifacts/run.json", max_bytes=1024 * 1024)
 
+    assert isinstance(retained, dict)
     selected.validate(retained)
     assert retained["metadata_content_withheld"] is True
     assert retained["hostname"] == "withheld"
@@ -532,18 +602,27 @@ def test_attempt_journal_retains_bounded_preverification_evidence(tmp_path: Path
         assert isinstance(summary, dict)
         assert summary["raw_log_truncated"] is True
         assert summary["raw_log_bytes"] == 6
-        assert artifacts.read_bytes(
-            "artifacts/baseline.validation.attempt.raw.log",
-            max_bytes=16,
-        ) == b"abc"
-        assert artifacts.read_bytes(
-            "artifacts/baseline.validation.attempt.input-subject.json",
-            max_bytes=4096,
-        ) == manifest.to_json_bytes()
-        assert artifacts.read_bytes(
-            "artifacts/rounds/001/author-attempt.final.md",
-            max_bytes=16,
-        ) == b"abcd"
+        assert (
+            artifacts.read_bytes(
+                "artifacts/baseline.validation.attempt.raw.log",
+                max_bytes=16,
+            )
+            == b"abc"
+        )
+        assert (
+            artifacts.read_bytes(
+                "artifacts/baseline.validation.attempt.input-subject.json",
+                max_bytes=4096,
+            )
+            == manifest.to_json_bytes()
+        )
+        assert (
+            artifacts.read_bytes(
+                "artifacts/rounds/001/author-attempt.final.md",
+                max_bytes=16,
+            )
+            == b"abcd"
+        )
         proof = artifacts.read_json(
             "artifacts/rounds/001/opaque-validation-proof.summary.json",
             max_bytes=4096,

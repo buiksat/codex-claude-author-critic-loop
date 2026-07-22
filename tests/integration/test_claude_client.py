@@ -7,6 +7,7 @@ import pytest
 from jsonschema import Draft7Validator
 
 from agent_loop.claude_client import (
+    CLAUDE_REAUTHENTICATION_FAILURE_DETAIL,
     ClaudeClient,
     ClaudeInvocation,
     ClaudeTransport,
@@ -24,9 +25,7 @@ from agent_loop.schemas import (
 )
 from agent_loop.service import BoundedProcessResult, run_bounded_process
 
-_MAX_API_REQUEST_DETAILS = (CLAUDE_API_RETRIES + 1) * (
-    CLAUDE_STRUCTURED_OUTPUT_RETRIES + 1
-)
+_MAX_API_REQUEST_DETAILS = (CLAUDE_API_RETRIES + 1) * (CLAUDE_STRUCTURED_OUTPUT_RETRIES + 1)
 
 
 def bundle() -> ReviewBundle:
@@ -42,9 +41,7 @@ def env() -> dict[str, str]:
 def process(
     payload: dict[str, object], *, code: int = 0, stderr: bytes = b""
 ) -> BoundedProcessResult:
-    return BoundedProcessResult(
-        code, json.dumps(payload).encode(), stderr, 1.0, 2.0, False, False
-    )
+    return BoundedProcessResult(code, json.dumps(payload).encode(), stderr, 1.0, 2.0, False, False)
 
 
 def api_request_detail(
@@ -109,12 +106,14 @@ def lgtm() -> dict[str, object]:
     return {
         "type": "result",
         "structured_output": {
-            "schema_version": 1,
-            "verdict": "LGTM",
-            "summary": "done",
-            "blocked_reason": None,
-            "blocking_findings": [],
-            "non_blocking_findings": [],
+            "review": {
+                "schema_version": 1,
+                "verdict": "LGTM",
+                "summary": "done",
+                "blocked_reason": None,
+                "blocking_findings": [],
+                "non_blocking_findings": [],
+            }
         },
     }
 
@@ -159,9 +158,15 @@ def test_051_one_internal_schema_retry_is_bounded_and_never_becomes_an_outer_loo
     second_attempt_valid: bool,
 ) -> None:
     invalid_payload = lgtm()
-    invalid_review = invalid_payload["structured_output"]
+    invalid_wrapper = invalid_payload["structured_output"]
+    assert isinstance(invalid_wrapper, dict)
+    invalid_review = invalid_wrapper["review"]
     assert isinstance(invalid_review, dict)
-    invalid_review["blocked_reason"] = "No blocking issues."
+    # Exercise Claude's wire-schema correction path with a structurally invalid
+    # object. Cross-field verdict contradictions are intentionally deferred to
+    # the independent local semantic validator because the Messages API rejects
+    # top-level schema combinators.
+    del invalid_review["summary"]
     invalid = process(invalid_payload)
     candidates = (invalid, process(lgtm()) if second_attempt_valid else invalid, process(lgtm()))
     transport_calls = 0
@@ -179,8 +184,8 @@ def test_051_one_internal_schema_retry_is_bounded_and_never_becomes_an_outer_loo
         for attempt_index, candidate in enumerate(candidates):
             schema_attempts += 1
             candidate_envelope = json.loads(candidate.stdout)
-            candidate_review = candidate_envelope.get("structured_output")
-            if not schema_validator.is_valid(candidate_review):
+            candidate_structured_output = candidate_envelope.get("structured_output")
+            if not schema_validator.is_valid(candidate_structured_output):
                 if attempt_index == retry_budget:
                     return process(
                         {
@@ -225,9 +230,7 @@ def test_051_one_internal_schema_retry_is_bounded_and_never_becomes_an_outer_loo
 )
 def test_051_exhaustion_classification(subtype: str, reason: StopReason) -> None:
     client = ClaudeClient(
-        lambda _inv, _timeout, _cap: process(
-            {"type": "error", "subtype": subtype}, code=1
-        )
+        lambda _inv, _timeout, _cap: process({"type": "error", "subtype": subtype}, code=1)
     )
     with pytest.raises(AgentLoopError) as caught:
         client.review(
@@ -237,6 +240,151 @@ def test_051_exhaustion_classification(subtype: str, reason: StopReason) -> None
             timeout_seconds=301,
         )
     assert caught.value.reason is reason
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": None,
+            "result": "Not logged in \u00b7 Please run /login",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": None,
+            "result": "OAuth token revoked \u00b7 Please run /login",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": None,
+            "result": "Login expired \u00b7 Please run /login",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": None,
+            "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 401,
+            "result": "Failed to authenticate. API Error: 401 Invalid bearer token",
+            "terminal_reason": "api_error",
+        },
+    ],
+    ids=[
+        "not-logged-in",
+        "oauth-revoked",
+        "login-expired",
+        "oauth-refresh-expired",
+        "http-401",
+    ],
+)
+def test_claude_authentication_envelopes_require_one_normal_vendor_login(
+    payload: dict[str, object],
+) -> None:
+    client = ClaudeClient(lambda _inv, _timeout, _cap: process(payload, code=1))
+
+    with pytest.raises(AgentLoopError) as caught:
+        client.review(
+            bundle(),
+            env(),
+            approval=ApprovalContext(True, True, True),
+            timeout_seconds=301,
+        )
+
+    assert caught.value.reason is StopReason.CREDENTIAL_REFRESH_FAILURE
+    assert caught.value.detail == CLAUDE_REAUTHENTICATION_FAILURE_DETAIL
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 403,
+            "result": "Not logged in \u00b7 Please run /login",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": None,
+            "result": "Not logged in - Please run /login",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": None,
+            "result": "Failed to authenticate: OAuth session expired and could not be refreshed.",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 401,
+            "result": "untrusted-marker",
+            "terminal_reason": "other",
+        },
+        {
+            "type": "error",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 401,
+            "result": "untrusted-marker",
+            "terminal_reason": "api_error",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 401.0,
+            "result": {"hostile": "untrusted-marker"},
+            "terminal_reason": "api_error",
+        },
+    ],
+    ids=[
+        "non-401-status",
+        "near-local-marker",
+        "near-oauth-refresh-marker",
+        "wrong-terminal-reason",
+        "wrong-envelope-type",
+        "non-integer-status-and-non-string-result",
+    ],
+)
+def test_claude_authentication_classification_fails_closed_on_near_matches(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(AgentLoopError) as caught:
+        ClaudeClient(lambda _inv, _timeout, _cap: process(payload, code=1)).review(
+            bundle(),
+            env(),
+            approval=ApprovalContext(True, True, True),
+            timeout_seconds=301,
+        )
+
+    assert caught.value.reason is StopReason.CRITIC_PROCESS_FAILURE
+    assert "untrusted-marker" not in caught.value.detail
 
 
 def test_valid_envelope_is_locally_revalidated() -> None:
@@ -344,9 +492,8 @@ def test_command_has_exact_tool_and_schema_flags() -> None:
 def test_api_request_diagnostic_records_exact_model_and_effort(
     include_format: bool,
 ) -> None:
-    stderr = (
-        b"2026-07-20T16:42:22.000Z [VERBOSE] harmless diagnostic\n"
-        + api_request_detail(include_format=include_format)
+    stderr = b"2026-07-20T16:42:22.000Z [VERBOSE] harmless diagnostic\n" + api_request_detail(
+        include_format=include_format
     )
     result = ClaudeClient(lambda _inv, _timeout, _cap: process(lgtm(), stderr=stderr)).review(
         bundle(),
@@ -380,7 +527,7 @@ def test_api_request_diagnostics_allow_the_complete_exact_retry_budget() -> None
     "stderr",
     [
         b"",
-        b"spoof [API REQUEST DETAIL] {\"model\":\"claude-pinned\"}\n",
+        b'spoof [API REQUEST DETAIL] {"model":"claude-pinned"}\n',
         api_request_detail(model="claude-other"),
         api_request_detail(effort="medium"),
         api_request_detail() + api_request_detail(effort=None),
@@ -401,8 +548,7 @@ def test_api_request_diagnostics_allow_the_complete_exact_retry_budget() -> None
                 }
             }
         ),
-        api_request_detail()
-        + api_request_detail(model="claude-other", effort="medium"),
+        api_request_detail() + api_request_detail(model="claude-other", effort="medium"),
         api_request_detail() * (_MAX_API_REQUEST_DETAILS + 1),
         (
             b"2026-07-20T16:42:22.627Z [VERBOSE] [API REQUEST DETAIL] "

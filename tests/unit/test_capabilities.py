@@ -14,6 +14,7 @@ from agent_loop.capabilities import (
     MAX_CAPABILITY_RECEIPT_VALIDITY_SECONDS,
     REQUIRED_ACCEPTANCE_GATES,
     AcceptanceGate,
+    AuthorServiceCapabilityBinding,
     CapabilityReceiptError,
     HostCapabilityBinding,
     LiveCapabilityBinding,
@@ -22,7 +23,6 @@ from agent_loop.capabilities import (
     verify_live_capability_receipt,
     write_successful_live_capability_receipt,
 )
-
 
 ISSUED = 2_000_000_000
 
@@ -43,6 +43,25 @@ def _binding() -> LiveCapabilityBinding:
             bubblewrap_executable_sha256="a" * 64,
             python_executable_sha256="9" * 64,
             runtime_closure_sha256="8" * 64,
+            author_service=AuthorServiceCapabilityBinding(
+                protocol=1,
+                build_id="fixed-system-author-v1",
+                authorized_uid=1000,
+                socket_path="/run/agent-loop/author.sock",
+                socket_owner_uid=1000,
+                socket_mode=0o600,
+                socket_unit_sha256="1" * 64,
+                broker_unit_sha256="2" * 64,
+                socket_dropin_sha256="3" * 64,
+                config_sha256="4" * 64,
+                install_record_sha256="5" * 64,
+                runtime_closure_sha256="6" * 64,
+                wheel_sha256="7" * 64,
+                codex_closure_sha256="8" * 64,
+                effective_units_sha256="9" * 64,
+                package_version="1.1.0",
+                broker_probe=True,
+            ),
             openat2=True,
             namespace_probe=True,
             transient_service_probe=True,
@@ -84,17 +103,20 @@ def _write(path: Path, binding: LiveCapabilityBinding | None = None) -> None:
 
 
 def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=True,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii") + b"\n"
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
 
 
 def test_private_atomic_writer_round_trips_complete_exact_receipt(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     binding = _binding()
 
     written = write_successful_live_capability_receipt(
@@ -129,7 +151,7 @@ def test_private_atomic_writer_round_trips_complete_exact_receipt(tmp_path: Path
 def test_private_writer_can_durably_replace_an_existing_private_receipt(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     _write(path)
     changed = replace(
         _binding(),
@@ -160,7 +182,7 @@ def test_writer_refuses_partial_reordered_or_duplicate_success_claims(
     tmp_path: Path,
     successful_gates: tuple[AcceptanceGate, ...],
 ) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     with pytest.raises(ValueError, match="complete ordered"):
         write_successful_live_capability_receipt(
             path,
@@ -172,13 +194,33 @@ def test_writer_refuses_partial_reordered_or_duplicate_success_claims(
 
 
 def test_receipt_binds_every_security_relevant_live_selection(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     binding = _binding()
     _write(path, binding)
     mismatches = (
         replace(binding, host=replace(binding.host, kernel="different-kernel")),
         replace(binding, host=replace(binding.host, os_version="26.04.1")),
         replace(binding, host=replace(binding.host, runtime_closure_sha256="7" * 64)),
+        replace(
+            binding,
+            host=replace(
+                binding.host,
+                author_service=replace(
+                    binding.host.author_service,
+                    broker_unit_sha256="7" * 64,
+                ),
+            ),
+        ),
+        replace(
+            binding,
+            host=replace(
+                binding.host,
+                author_service=replace(
+                    binding.host.author_service,
+                    codex_closure_sha256="6" * 64,
+                ),
+            ),
+        ),
         replace(binding, codex=replace(binding.codex, version="codex-cli 0.144.7")),
         replace(binding, codex=replace(binding.codex, executable_sha256="e" * 64)),
         replace(binding, codex=replace(binding.codex, install_closure_sha256="f" * 64)),
@@ -241,7 +283,7 @@ def test_receipt_binds_every_security_relevant_live_selection(tmp_path: Path) ->
 
 
 def test_receipt_rejects_future_expired_and_too_old_claims(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     binding = _binding()
     _write(path, binding)
 
@@ -265,7 +307,7 @@ def test_writer_rejects_invalid_or_overlong_lifetime(
 ) -> None:
     with pytest.raises(ValueError, match="valid_for_seconds"):
         write_successful_live_capability_receipt(
-            tmp_path / "capabilities" / "live-v2.json",
+            tmp_path / "capabilities" / "live-v3.json",
             _binding(),
             successful_gates=REQUIRED_ACCEPTANCE_GATES,
             issued_at_unix=ISSUED,
@@ -274,7 +316,7 @@ def test_writer_rejects_invalid_or_overlong_lifetime(
 
 
 def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     binding = _binding()
     _write(path, binding)
     valid = json.loads(path.read_bytes())
@@ -323,8 +365,8 @@ def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: 
     canonical = _canonical_json(valid)
     mutations.append(
         canonical.replace(
-            b'"schema_version":2',
-            b'"schema_version":2,"schema_version":2',
+            b'"schema_version":3',
+            b'"schema_version":3,"schema_version":3',
         )
     )
     mutations.append(json.dumps(valid, indent=2, sort_keys=True).encode("ascii") + b"\n")
@@ -336,7 +378,7 @@ def test_unknown_missing_duplicate_and_noncanonical_json_are_rejected(tmp_path: 
 
 
 def test_verifier_rejects_permissive_file_and_directory_modes(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     binding = _binding()
     _write(path, binding)
 
@@ -351,7 +393,7 @@ def test_verifier_rejects_permissive_file_and_directory_modes(tmp_path: Path) ->
 
 
 def test_verifier_rejects_symlinks_and_hard_links(tmp_path: Path) -> None:
-    path = tmp_path / "capabilities" / "live-v2.json"
+    path = tmp_path / "capabilities" / "live-v3.json"
     binding = _binding()
     _write(path, binding)
 
@@ -368,7 +410,7 @@ def test_verifier_rejects_symlinks_and_hard_links(tmp_path: Path) -> None:
 
 def test_intermediate_directory_symlink_is_never_followed(tmp_path: Path) -> None:
     real = tmp_path / "real"
-    path = real / "live-v2.json"
+    path = real / "live-v3.json"
     binding = _binding()
     _write(path, binding)
     redirect = tmp_path / "redirect"
@@ -376,7 +418,7 @@ def test_intermediate_directory_symlink_is_never_followed(tmp_path: Path) -> Non
 
     with pytest.raises(CapabilityReceiptError, match="without symlinks"):
         verify_live_capability_receipt(
-            redirect / "live-v2.json",
+            redirect / "live-v3.json",
             binding,
             now_unix=ISSUED + 1,
         )
@@ -388,10 +430,10 @@ def test_writer_rejects_existing_symlink_without_touching_its_target(tmp_path: P
     target = directory / "target"
     target.write_bytes(b"do not replace")
     target.chmod(0o600)
-    receipt_path = directory / "live-v2.json"
+    receipt_path = directory / "live-v3.json"
     receipt_path.symlink_to(target.name)
 
-    with pytest.raises(CapabilityReceiptError, match="existing.*private regular"):
+    with pytest.raises(CapabilityReceiptError, match=r"existing.*private regular"):
         _write(receipt_path)
 
     assert target.read_bytes() == b"do not replace"
@@ -401,16 +443,16 @@ def test_writer_rejects_existing_symlink_without_touching_its_target(tmp_path: P
 def test_writer_rejects_existing_permissive_or_hard_linked_file(tmp_path: Path) -> None:
     directory = tmp_path / "capabilities"
     directory.mkdir(mode=0o700)
-    receipt_path = directory / "live-v2.json"
+    receipt_path = directory / "live-v3.json"
     receipt_path.write_bytes(b"old")
     receipt_path.chmod(0o644)
 
-    with pytest.raises(CapabilityReceiptError, match="existing.*private regular"):
+    with pytest.raises(CapabilityReceiptError, match=r"existing.*private regular"):
         _write(receipt_path)
 
     receipt_path.chmod(0o600)
     os.link(receipt_path, directory / "second-link")
-    with pytest.raises(CapabilityReceiptError, match="existing.*private regular"):
+    with pytest.raises(CapabilityReceiptError, match=r"existing.*private regular"):
         _write(receipt_path)
 
 
@@ -468,11 +510,10 @@ def test_environment_report_constructor_requires_managed_claude_boundary() -> No
         )
 
 
-def test_receipt_v2_path_and_schema_are_explicit() -> None:
-    assert CAPABILITY_RECEIPT_SCHEMA_VERSION == 2
-    assert CAPABILITY_RECEIPT_RELATIVE_PATH == Path(
-        "agent-loop/capabilities/live-v2.json"
-    )
+def test_receipt_v3_path_schema_and_control_context_gate_are_explicit() -> None:
+    assert CAPABILITY_RECEIPT_SCHEMA_VERSION == 3
+    assert CAPABILITY_RECEIPT_RELATIVE_PATH == Path("agent-loop/capabilities/live-v3.json")
+    assert AcceptanceGate.CODEX_CONTROL_CONTEXT_ISOLATION in REQUIRED_ACCEPTANCE_GATES
 
 
 def test_validity_ceiling_is_explicitly_short_lived() -> None:

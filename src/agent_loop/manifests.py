@@ -517,9 +517,7 @@ def reconcile_candidate(
     discarded = tuple(
         change
         for change in candidate_delta
-        if any(
-            policy.classify(path) is PathDisposition.DISCARD_ONLY for path in change.paths
-        )
+        if any(policy.classify(path) is PathDisposition.DISCARD_ONLY for path in change.paths)
     )
     return ReconciliationResult(
         candidate_delta=candidate_delta,

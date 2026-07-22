@@ -1,32 +1,29 @@
 # agent-loop
 
-`agent-loop` is a containment-first implementation of the frozen
-[`plan-v1.0`](PLAN.md) design: Codex is the only code-writing author, Claude is a fresh
+`agent-loop` is a containment-first implementation of the unfrozen
+[`plan-v1.1`](PLAN.md) successor design: Codex is the only code-writing author, Claude is a fresh
 tool-disabled critic, and a deterministic Python runner owns validation, limits, evidence, and
 stop decisions.
 
-The version-1 implementation paths, portable control plane, executable fake-agent matrix, and
-target-host containment components have broad automated coverage. Qualification is nevertheless
-incomplete: the required Ruff/strict-mypy gates were unavailable, and several pinned-CLI behavioral
-clauses remain unproved. The managed Claude system boundary is installed and passed its no-network
-initialization probe. The first explicitly authorized qualification failed before the
-Codex resume: the documented Codex selector was absent from the pinned CLI's bundled and cached
-model catalogs, making it the strongest diagnosis for that otherwise opaque failure, while the
-dedicated Claude token was rejected with HTTP 401. After correcting the selector and rotating the
-token, a second explicitly authorized qualification reached the Claude review and both Codex
-turns, then finished with 24 passes and two failures. Claude authenticated but returned an `LGTM`
-shape that the old JSON Schema accepted and the local semantic validator rejected; Codex completed
-the first turn and exact resume on one thread, but its pinned public JSONL omitted positive model
-and effort facts. Local remediations now encode the verdict invariants in the critic schema and
-prompt, and pair Codex's successful public events with a strictly confined private per-thread
-rollout's resolved request selection, lifecycle, and append-only prefix witness. Those changes have
-not yet passed a new live qualification, so no capability receipt exists and the runtime remains
-intentionally blocked. No paid model call is required by
-installation or the normal test suite. Do not treat the package as a production security boundary;
-see
+The original `plan-v1.0` tag remains an immutable historical baseline. Qualification exposed an
+Ubuntu namespace-composition failure in the author boundary, a remotely unsupported Claude schema
+keyword combination, and unnecessary authentication ceremony. `plan-v1.1` addresses those findings
+with a fixed administrator-installed author broker, a remote-compatible critic wire schema plus
+strict local semantics, and private reuse of already-present Codex and Claude CLI file logins. The
+successor implementation is now qualified on the pinned host: repository test evidence is
+`814 passed, 8 skipped`, and the exact installed wheel passed the installed qualifier's 18 live
+gates and minted a schema-v3 receipt. The root-owned install record and private receipt, rather than
+this packaged document, carry the artifact hashes so rebuilding documentation cannot create a
+self-referential digest claim. That receipt proves only its exact bound
+host, artifact, selections, and 18-gate scope; it is not by itself a `78/78` acceptance claim.
+Installation and ordinary deterministic tests make no paid model calls. Do not treat the package as
+a production security boundary; see
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for current evidence.
 
-## Frozen support matrix
+**Current status: implementation qualified on the pinned host; `plan-v1.1` remains unfrozen pending
+repository change control.**
+
+## Pinned qualification matrix
 
 Version 1 deliberately has no compatibility fallback.
 
@@ -56,7 +53,7 @@ wheel without isolation or network resolution, then install that reviewed artifa
 python3.14 -c 'import setuptools; assert setuptools.__version__ == "78.1.1"'
 PIP_NO_INDEX=1 python3.14 -m pip wheel . --no-cache-dir --no-build-isolation \
   --no-deps --wheel-dir dist
-PIP_NO_INDEX=1 pipx install dist/agent_loop-1.0.0-py3-none-any.whl --python python3.14
+PIP_NO_INDEX=1 pipx install dist/agent_loop-1.1.0-py3-none-any.whl --python python3.14
 agent-loop --help
 ```
 
@@ -73,54 +70,116 @@ dependency workflow; these commands do not authorize fetching it. The test suite
 host-provided `pytest` and `jsonschema`; do not fetch tooling implicitly on a production runner.
 
 The source distribution retains `PLAN.md`, `docs/IMPLEMENTATION_STATUS.md`, `schemas/`, and the
-reviewed `support/managed-claude-boundary/` assets at their repository-relative paths. A wheel
-installs the same frozen evidence and boundary sources under `share/agent-loop/` beneath the
-installation prefix. It does not install the managed policy into `/etc` or the helper into
-`/usr/local`; that remains an explicit administrator action.
+reviewed administrator-boundary sources under `support/`. A wheel installs the same successor
+evidence and support sources under `share/agent-loop/` beneath the installation prefix. It does not
+modify system paths; administrator-owned assets require a separate, explicit, one-time bootstrap.
 
-## Credential provisioning
+## Authentication: existing CLI sign-ins are reused automatically
 
-The runner accepts only explicit credential identifiers. It does not import ambient API keys,
-`~/.codex`, Claude keychain state, cloud configuration, SSH agents, or a user's complete CLI home.
-Credential IDs must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`.
+If Codex CLI and Claude Code are already signed in, run `agent-loop` directly. There is no
+`agent-loop auth` setup step, credential profile prompt, token paste, or per-project login. Sign in
+to a vendor only when its own status command reports that it is signed out, or when an actual model
+request returns the runner's exact vendor-session-ended diagnostic. Then rerun the original
+command:
 
-Credential state lives outside retained runs:
+```bash
+codex login          # after confirmed sign-out or an exact remote-session rejection
+claude auth login    # after confirmed sign-out or an exact remote-session rejection
+```
+
+On the first run, `agent-loop` privately copies the supported standard file-backed sessions from
+the authorized operator's passwd-resolved home (not an inherited model-controlled `HOME`) at these
+locations:
+
+```text
+~/.codex/auth.json
+~/.claude/.credentials.json
+```
+
+It copies neither surrounding CLI configuration nor the user's home. Later runs reuse the private
+default pair and persist valid vendor refreshes automatically. If a vendor later signs you out,
+run only that vendor's normal login command once and rerun the failed `agent-loop` command. A
+strictly newer standard login is detected, probed in disposable private state, and atomically
+adopted under the same
+locks; no `agent-loop auth init`, import, or repair step is required. Stale or equal ambient files
+can never roll the private pair backward.
+
+Behind the scenes, that initial private copy verifies ownership, modes, file types, credential
+shape, and pinned CLI compatibility. Private stores are mode `0700`, credential files are mode
+`0600`, and updates
+use a locked, fsynced two-provider transaction so a crash cannot silently leave a half-updated
+pair. Only a valid pair may synchronize strictly newer standard generations. Invalid, partial, or
+ambiguous managed state is never overwritten automatically; that exceptional case stops before
+spending and gives an advanced integrity-repair command.
+
+Credential state remains outside retained runs:
 
 ```text
 ${XDG_STATE_HOME:-$HOME/.local/state}/agent-loop/credentials/
-├── codex/<id>/
-│   ├── auth.json                  # durable file auth, mode 0600
-│   ├── lock                       # account-wide lock
-│   └── transactions/<run-id>/    # active refresh/resume state
-└── claude/<id>/
-    └── oauth-token                # dedicated setup-token output, mode 0600
+├── default-profile.json
+├── default-profile-transition.json  # present only during recoverable pair commit
+├── lock
+├── codex/default/
+│   ├── auth.json
+│   ├── lock
+│   └── transactions/<run-id>/
+└── claude/default/
+    ├── credentials.json
+    ├── lock
+    └── transactions/<run-id>/
 ```
 
-Create every credential directory with mode `0700` and every credential file with mode `0600`.
-Provision Codex with an explicitly selected and validated file-auth `auth.json`; never point the
-runner at an ambient Codex home. Generate a dedicated Claude automation token with
-the exact reviewed executable (for the detected install,
-`/home/bahram/.local/share/claude/versions/2.1.215 setup-token`), then place only that token in
-`oauth-token`. Avoid putting either secret on a command line, in shell history, in project
-configuration, or in retained artifacts.
+### Advanced authentication diagnostics and recovery
 
-One possible offline placement pattern is:
+Most users should never run these commands. `agent-loop auth status` is a local, secret-free
+diagnostic. Use `auth init --repair` only when the runner explicitly reports
+`repair_required`; ordinary sign-in, sign-out, refresh, and rotation do not need it:
 
 ```bash
-STATE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}"
-install -d -m 0700 "$STATE_ROOT/agent-loop/credentials/codex/author-account"
-install -d -m 0700 "$STATE_ROOT/agent-loop/credentials/claude/critic-token"
-install -m 0600 /secure/input/codex-auth.json \
-  "$STATE_ROOT/agent-loop/credentials/codex/author-account/auth.json"
-install -m 0600 /secure/input/claude-setup-token \
-  "$STATE_ROOT/agent-loop/credentials/claude/critic-token/oauth-token"
+agent-loop auth status
+agent-loop auth init --repair           # only after an explicit repair_required result
 ```
 
-The `/secure/input/...` files are operator-managed examples, not ambient CLI locations. Check the
-final ownership and modes before use. The Codex account lock is held across first and resumed turns;
-a validated refresh is atomically reconciled to the durable file.
+Custom credential IDs and nonstandard import paths remain available through
+`agent-loop auth init --help` for advanced deployments.
 
-## Managed Claude administrator boundary
+`agent-loop auth status` reports both per-vendor
+`local_copy_present_and_parseable` values, explicitly reports vendor session validity as
+`not_checked`, and includes a secret-free
+`default_profile.state`: `absent`, `ready`, `busy`, `recovery_pending`, or `repair_required`. It
+uses a short lock wait, so an active run reports `busy` instead of hanging. A pending valid paired
+transition is recovered automatically by the next intended run. A partial or ambiguous first
+bootstrap fails closed as `repair_required`. Only that state names `agent-loop auth init --repair`,
+including for stores created before the paired commit format was introduced.
+
+If a supported file login is genuinely unavailable, the run stops before spending and names the
+vendor status/login command. The local status probe is not a remote-validity proof: an actual model
+request can still identify a remotely rejected Codex or Claude session and return the exact
+vendor-specific one-login-and-rerun diagnostic. Reauthenticate directly after that exact remote
+diagnostic even if the status command still reports a local login. A generic probe or process
+failure alone does not prove expiry or revocation, so check the vendor status command first in that
+case. A local runner cannot remove the vendors' account boundary, but it removes redundant
+project-specific and per-run authentication. Keyring-only, setup-token, and API-key profiles
+require a separately qualified advanced adapter and never activate implicitly.
+
+## One-time administrator boundaries
+
+The pinned Codex CLI launches model-generated commands through its own Bubblewrap permission
+profile. On the target Ubuntu host that inner sandbox cannot be nested beneath the former
+unprivileged outer Bubblewrap namespace. The successor therefore uses one fixed, root-owned,
+socket-activated author broker. An administrator reviews a hash-verified built artifact and
+authorizes exactly one numeric operator UID and one reviewed Codex installation-closure digest
+during installation. The broker independently snapshots and hashes the supplied runtime and Codex
+closures on every request, accepting only the installed wheel runtime and the root-owned Codex
+allowlist. It has a fixed protocol, command, mount set, limits, and systemd policy; an ordinary user
+cannot supply arbitrary argv, unit properties, paths, environment, or substitute executable.
+
+The reviewed, failure-atomic bootstrap and exact digest-bound replacement procedure are packaged
+under [`support/author-service/`](support/author-service/README.md). This is a one-time host
+operation, not an authentication step: after it succeeds, ordinary `agent-loop run` commands
+connect through the protected Unix socket and require no `sudo`, Polkit, or administrator prompt.
+
+### Managed Claude boundary
 
 The reviewed assets under `support/managed-claude-boundary/` define the only managed Claude policy
 accepted by production: an exact `/etc/claude-code/managed-settings.json` and a small fixed
@@ -149,41 +208,47 @@ and finishes by running the production boundary inspector over their exact metad
 closure hashes. An existing Claude system policy must be reviewed and reconciled by an
 administrator; this script never deletes or silently replaces it.
 
-These commands provision only the non-secret managed boundary. They do not provision the dedicated
-Codex file-auth identity or Claude setup token described above and do not authorize spending. Keep
-`AGENT_LOOP_CONFIRM_PAID_CODEX` and `AGENT_LOOP_CONFIRM_PAID_CLAUDE` unset during installation and
-dry checks.
+These commands provision only the non-secret managed boundary. They do not import or expose either
+CLI credential and do not authorize spending. Paid qualification is authorized later, explicitly,
+with `agent-loop qualify --live --accept-paid`; no paid-confirmation environment variables are
+needed for installed use.
 
 ## Configuration and commands
 
-The command interface is:
+The normal command interface is intentionally short; `--state-home` is optional and defaults to
+`${XDG_STATE_HOME:-$HOME/.local/state}`:
 
 ```bash
-agent-loop --state-home /home/bahram/.local/state run \
+agent-loop run \
   --task task.md \
-  --check '/usr/bin/python3.14 -m pytest -q' \
-  --codex-executable \
-    /home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js \
-  --claude-executable /home/bahram/.local/share/claude/versions/2.1.215 \
-  --author-model gpt-5.4 \
-  --author-effort high \
-  --critic-model claude-opus-4-6 \
-  --critic-effort medium \
-  --codex-credential-id author-account \
-  --claude-credential-id critic-token
-agent-loop --state-home /home/bahram/.local/state status <run-id>
-agent-loop --state-home /home/bahram/.local/state show <run-id> [--round N]
+  --check '/usr/bin/python3.14 -m pytest -q'
+agent-loop status <run-id>
+agent-loop show <run-id> [--round N]
 ```
 
-The executable paths above are the detected reviewed installs; the model choices are explicit
-receipt-bound selections, not moving aliases. The command is copy-paste complete after `task.md`,
-the two named credential stores, and the matching live-capability receipt described below exist. On
-a different reviewed installation, replace the absolute paths and exact models consistently in
-both the live gates and the run command; an old receipt will intentionally stop matching.
+With no selection flags, the runner discovers only the exact pinned Codex 0.144.6 and Claude Code
+2.1.215 installations, and selects the reviewed receipt-bound defaults: `gpt-5.4`/`high` for the
+author and `claude-opus-4-6`/`medium` for the critic. Exact executable/model/effort overrides remain
+available for reviewed successor configurations, but any difference intentionally invalidates an
+old receipt. The default credential profile is also selected without a flag and, when wholly
+absent, is bootstrapped with exclusive, ordinary-exception-atomic writes from the active CLI file
+logins before the first model call. A hard-crash partial is detected and fails closed for reviewed
+integrity repair rather than becoming usable. The command becomes eligible for production only
+after the matching live-capability receipt described below exists.
+
+Add `--dry-run` to the `run` command for a static preview. It resolves and verifies the task,
+configuration, committed `HEAD`, exact executable selections, and pinned host boundary, then exits
+without discovering/importing credentials, checking or minting a live receipt, running validation,
+creating a retained run, or calling either model. A dry run is therefore useful before login or
+qualification; it is a preview, not evidence that the paid path is qualified.
 
 `status` reports bounded run state. `show` reports the retained run manifest and structured round
-summaries; raw sensitive logs remain separate. There is intentionally no run-level `resume`
-command. Exact Codex thread resume occurs only inside one healthy in-process run.
+summaries; raw sensitive logs remain separate. A successful run's supported final code handoff is
+the normalized private tree at `<run-root>/subjects/current/`, where `<run-root>` is printed by
+`run`. Copy that tree to a new destination while no process is operating on the retained run;
+files intentionally retain private owner-only modes, and the original source checkout is never
+modified automatically. There is intentionally no run-level `resume` command. Exact Codex thread
+resume occurs only inside one healthy in-process run.
 
 Project configuration is strict TOML in `.agent-loop.toml` (or `--config PATH`). Unknown keys are
 rejected, configured limits may only tighten defaults, protected paths are additive, and validation
@@ -200,13 +265,6 @@ opaque_nonsemantic_paths = []
 review_context_paths = ["pyproject.toml"]
 read_only_toolchain_mounts = []
 
-author_model = "gpt-5.4"
-author_effort = "high"
-critic_model = "claude-opus-4-6"
-critic_effort = "medium"
-codex_credential_id = "author-account"
-claude_credential_id = "critic-token"
-
 max_rounds = 3
 max_runtime_seconds = 2700
 author_timeout_seconds = 900
@@ -220,8 +278,9 @@ max_total_subject_bytes = 268435456
 ```
 
 CLI options also cover protected validation harnesses, discard-only and opaque non-semantic paths,
-review context, reviewed read-only toolchain paths, exact model/effort values, timeouts, and
-credential IDs. Run `agent-loop run --help` for the concrete spelling.
+review context, reviewed read-only toolchain paths, exact model/effort values, and timeouts. Model,
+effort, and credential-profile overrides are advanced options; omit them for the reviewed defaults
+and automatic login reuse. Run `agent-loop run --help` for the concrete spelling.
 
 `protected_opt_in_paths` may contain only exact relative paths declared before the run; globbing and
 every `.git` control path are rejected. Because the generated profile cannot express an allow-hole
@@ -247,78 +306,64 @@ preflight, containment, credential, or spending gate.
 
 ### Opt-in real-CLI capability receipt
 
-Production runs require a fresh private receipt proving the eleven receipt-bound target-host and
-paid/live acceptance gates for the exact host and selections. That receipt is necessary, but is not
-by itself proof of all 72 acceptance contracts or completion of the static-analysis, pinned-Claude
-retry, and clean-install work listed in the status document. The tests never infer ambient
-credentials or installations. On the detected frozen host, an operator who has
-independently provisioned the managed Claude boundary can set every required selector explicitly:
+Production runs require a fresh private schema-v3 receipt proving every receipt-bound target-host
+and paid/live gate for the exact host and selections. That receipt is necessary, but is not by
+itself proof of all 78 acceptance contracts or completion of deterministic, static-analysis, and
+clean-install work listed in the status document. On the pinned target host, after the one-time
+administrator boundary installation, the installed command discovers the exact pinned CLIs and
+reuses the default private credential pair automatically:
+
+The currently installed wheel passed the installed qualifier's 18 live gates and minted the current
+schema-v3 receipt. The root-owned install record and private receipt bind its exact digest. This is
+successful qualification evidence for that exact binding, not shorthand for all 78 acceptance
+contracts. Use the same generic commands to inspect the paid scope and refresh the receipt when its
+bound inputs change or it expires:
 
 ```bash
-export AGENT_LOOP_ALLOW_LIVE=1
-export AGENT_LOOP_CONFIRM_PAID_CODEX=1
-export AGENT_LOOP_CONFIRM_PAID_CLAUDE=1
-export AGENT_LOOP_STATE_HOME=/home/bahram/.local/state
-
-export AGENT_LOOP_CODEX_CREDENTIAL_ID=author-account
-export AGENT_LOOP_CODEX_INSTALL_ROOT=/home/bahram/.npm-global/lib/node_modules/@openai/codex
-export AGENT_LOOP_CODEX_INSTALL_RELATIVE=bin/codex.js
-export AGENT_LOOP_CODEX_PATH=/home/bahram/.npm-global/lib/node_modules/@openai/codex/bin/codex.js
-export AGENT_LOOP_CODEX_MODEL=gpt-5.4
-export AGENT_LOOP_CODEX_EFFORT=high
-
-export AGENT_LOOP_CLAUDE_CREDENTIAL_ID=critic-token
-export AGENT_LOOP_CLAUDE_INSTALL_ROOT=/home/bahram/.local/share/claude/versions
-export AGENT_LOOP_CLAUDE_INSTALL_RELATIVE=2.1.215
-export AGENT_LOOP_CLAUDE_MODEL=claude-opus-4-6
-export AGENT_LOOP_CLAUDE_EFFORT=medium
-export AGENT_LOOP_CLAUDE_MANAGED_POLICY_PROBE=attested-v1
-export AGENT_LOOP_CLAUDE_MANAGED_PROBE_ID=reviewed-managed-boundary-v1
-
-python3.14 -m pytest -q tests/host tests/real_cli
+agent-loop qualify --live              # prints the paid scope; makes no model call
+agent-loop qualify --live --accept-paid
 ```
 
-The two `AGENT_LOOP_CONFIRM_PAID_*` variables authorize real, potentially billable model traffic:
-one Codex first-turn call, one exact-resume call, and one Claude CLI review invocation. That Claude
-invocation may make one initial model request and, only when its output fails the supplied schema,
-at most one schema-correction model request. Its separately configured
+`--accept-paid` authorizes the printed, potentially billable model traffic: one Codex first-turn
+call, one exact-resume call, and one Claude CLI review invocation. That Claude invocation may make
+one initial model request and, only when its output fails the supplied schema, at most one
+schema-correction model request. Its separately configured
 `CLAUDE_CODE_MAX_RETRIES=2` API retry budget can retry API attempts and is not the schema-correction
-budget. Do not export the confirmation variables for installation or a dry check. The
-managed-policy selectors are non-secret identifiers, not a substitute for the installed and
-locally verified boundary.
+budget. The paid flag is a cost/start gate, not another login or credential selector.
 
-At pytest session finish, a receipt is written only if target-host gates 8/9/10/11/29/30/71, the
-combined Codex gates 33/65/66, and Claude gate 49 truly pass, including exact observed model/effort
-assertions. Every required setup/call/teardown phase must pass in the same pytest session, with no
-skip, xfail, xpass, failure, or missing gate. The session ledger is reset at session start, so
-results from separate invocations cannot be combined. The harness then re-runs the full production
-preflight and re-hashes the exact reviewed Codex and Claude install closures plus the
-location-independent runtime Python-source closure before writing:
+The installed command carries its production probes in the wheel; it does not invoke pytest or
+require a repository `tests/` directory. A receipt is written only if acceptance gates
+8/9/10/11/29/30/33/49/51/64/65/66/71/72/73/74/76/78 truly pass, including the fixed author-manager
+composition, exact observed model/effort evidence, account-auth isolation, and remote Claude wire
+schema. The command re-runs the full production preflight and re-hashes the reviewed
+broker/config/install closures, exact Codex and Claude install closures, managed Claude boundary,
+and location-independent runtime Python-source closure before writing:
 
 ```text
-/home/bahram/.local/state/agent-loop/capabilities/live-v2.json
+${XDG_STATE_HOME:-$HOME/.local/state}/agent-loop/capabilities/live-v3.json
 ```
 
 The containing directory is mode `0700` and the receipt is mode `0600`. It contains no credential
 bytes. It is valid for at most seven days and binds the exact OS/kernel/Python/Git/systemd/Bash and
 Bubblewrap facts and probes, executable and install-closure hashes, credential identifiers,
-requested models and efforts, and the managed Claude policy/helper absolute paths, closure hashes,
-attestation protocol, and fixed probe identifier. Production reconstructs that binding from its
-current preflight; any mismatch, stale timestamp, unsafe metadata, or absent receipt stops before
-spending. Version-1 receipts are neither accepted nor migrated: changing to this boundary requires a
-new successful combined live session to mint `live-v2.json`.
+requested models and efforts, the fixed author-manager identity/closure, and the managed Claude
+policy/helper absolute paths, closure hashes, attestation protocol, and fixed probe identifier.
+Production reconstructs that binding from its current preflight; any mismatch, stale timestamp,
+unsafe metadata, or absent receipt stops before spending. Older receipts and partial schema-v3
+attempts are neither accepted nor migrated: a successful combined live session is required to mint
+or refresh `live-v3.json`.
 
 For Codex 0.144.6, the public success stream is first checked for the pinned server-reroute error
-signal. The adapter then confined-reads one exact-thread private rollout, accepts only frozen
-durable item types and complete turn lifecycles, and matches the client-resolved model/effort to
-the request. Ordinary resume must preserve the prior bytes as a SHA-256-witnessed prefix plus
-exactly one turn. Raw rollout contents and the in-memory prefix witness are never copied into run
-artifacts.
+signal. The adapter then confined-reads one exact-thread private rollout, accepts only the pinned
+allowlist of durable item types and complete turn lifecycles, and matches the client-resolved
+model/effort to the request. Ordinary resume must preserve the prior bytes as a SHA-256-witnessed
+prefix plus exactly one turn. Raw rollout contents and the in-memory prefix witness are never copied
+into run artifacts.
 
-Neither failed qualification described above minted a receipt. Installation, documentation, and
-the normal test suite do not run model calls. Do not set the live gates until all portable,
-fake-agent, and target-host tests pass and the operator has explicitly authorized the exact
-accounts, models, timeouts, and calls. A skipped or xfailed test is not a successful smoke test.
+Installation, documentation, dry runs, and the normal test suite do not run model calls. A local
+receipt is evidence for only the exact host and selections it binds; check or refresh it with the
+installed `qualify` command after reviewing the printed scope. Any failed or partial qualification
+leaves the previous receipt absent or unchanged and never turns into an authentication prompt.
 
 ## Default limits
 
@@ -340,12 +385,14 @@ bounds are independent. Version 1 does not claim a hard inode quota.
 ## Security and artifact handling
 
 The design requires a private Git-derived subject with no `.git`, ignore-independent manifest
-capture, a generated sanitized Codex home, exact thread-ID routing, fresh tool-disabled Claude
-reviews, no network for model-generated commands/Git/validation/critic tools, and one fresh bounded
-tmpfs for each complete ordered validation suite. Checks in a suite run sequentially in that shared
-workspace, with descendants cleaned between checks; author execution remains a separate sandbox.
-The trusted Codex and Claude control processes retain normal host egress for authentication and
-model traffic; version 1 does not provide hostname allowlisting.
+capture, generated transactional Codex and Claude homes, exact thread-ID routing, fresh
+tool-disabled Claude reviews, no network for model-generated commands/Git/validation/critic tools,
+and one fresh bounded tmpfs for each complete ordered validation suite. Checks in a suite run
+sequentially in that shared workspace, with descendants cleaned between checks. Author execution
+uses the fixed root-owned outer manager plus Codex's mandatory inner no-network permission-profile
+sandbox; validation, Git, and critic containment remain unprivileged user-service boundaries. The
+trusted Codex and Claude control processes retain normal host egress for authentication and model
+traffic; version 1 does not provide hostname allowlisting.
 
 Runs are retained beneath:
 
@@ -383,16 +430,19 @@ Important limitations remain:
   means some builds and commands such as `git describe` are unsupported.
 - Synthetic homes and a scrubbed `PATH` can break language toolchains unless mounts are reviewed and
   declared before the run; credentialed caches and container sockets remain forbidden.
-- `openat2`, Bubblewrap, systemd user services, and the trusted supervisor are Linux security
-  boundaries, not portable conveniences.
+- `openat2`, Bubblewrap, systemd services, the fixed author broker, and the trusted supervisor are
+  Linux security boundaries, not portable conveniences.
 - There is no automatic commit, push, PR, publication, direct-checkout mode, linked worktree,
   alternate sandbox, agent fleet, or crash/interruption resume.
 
 ## Rotation and recovery
 
-Rotate credentials only while no run holds the account lock. Replace the durable Codex `auth.json`
-or Claude `oauth-token` with a newly validated mode-`0600` file using a same-directory atomic
-replacement, then rerun non-model authentication/capability probes before spending.
+Ordinary Codex and Claude refreshes are automatic while the account locks are held. For a normal
+vendor re-login or deliberate vendor rotation, stop active runs, use the vendor's own login
+command, and rerun `agent-loop`; the strictly newer standard generation is validated and installed
+atomically before any model call. Use `agent-loop auth init --repair` only after explicit review of
+damaged/legacy pair metadata, or for a nonstandard source/custom profile. Never pass a secret on
+the command line.
 
 An incomplete Codex transaction is deliberate recovery evidence. On the next locked acquisition,
 the runner may promote it only when the durable credential still matches the recorded baseline and
@@ -413,19 +463,15 @@ python3.14 -m pytest -q -m 'not real_cli'
 python3.14 -m compileall -q src tests
 ```
 
-At this revision, pytest collected 674 tests; 646 portable tests and 22 host-marked tests passed,
-and the combined non-real-CLI selection passed 668 tests. That selection excludes all six
-`real_cli`-marked nodes. Two non-model Codex probes and two pinned-Claude schema probes against
-process-local fake endpoints were run separately and passed. The Claude probes prove canonical
-schema handoff and exactly one correction retry without external network or model traffic. The
-first combined live qualification finished with 23 passes and three failures before Codex resume.
-After its selector and credential remediations, a second combined qualification exercised Claude
-plus both Codex turns and finished with 24 passes and two failures. Claude's old schema admitted a
-semantically contradictory review, and Codex's public JSONL omitted model/effort selection facts.
-The locally reviewed schema and private-rollout evidence remediations still require a fresh
-explicitly authorized combined qualification; no receipt was written.
+Current repository test evidence is `814 passed, 8 skipped`. Separately, the exact installed wheel
+passed the installed qualifier's 18 live gates and minted a schema-v3 receipt on the pinned host.
+Its digest is recorded outside the packaged documentation in the root-owned install record and
+receipt binding. The test count and live
+receipt have different scopes, and neither converts the 18 receipt-bound gates into a `78/78`
+claim. The implementation is qualified on that pinned binding; specification freeze remains pending
+the repository review and change-control record.
 
-Run target-host checks only on the frozen matrix:
+Run target-host checks only on the pinned matrix:
 
 ```bash
 python3.14 -m pytest -q tests/host
@@ -440,8 +486,9 @@ mypy src tests
 ```
 
 Pytest's `host` marker denotes pinned Ubuntu/Bubblewrap/systemd behavior. `real_cli` denotes an
-explicitly authorized CLI probe and may require dedicated credential identifiers. Passing portable
+explicitly authorized CLI probe using the selected private credential profile. Passing portable
 tests does not imply that either marker has passed.
 
-The frozen specification is authoritative. A change that weakens a boundary belongs in a reviewed
-successor specification, not a compatibility fallback.
+The unfrozen `plan-v1.1` successor is authoritative for current implementation work. Its
+implementation qualification has passed on the pinned host, but it must not be frozen or tagged
+until the required repository review, merge, and annotated-tag change-control record is complete.

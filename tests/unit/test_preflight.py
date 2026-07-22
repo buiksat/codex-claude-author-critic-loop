@@ -53,8 +53,8 @@ def test_fast_service_version_probe_uses_inspection_gate() -> None:
 
     assert output == b"fast-version\n"
     assert runner.input_bytes == b"\x00"
-    assert runner.command[:4] == ("/usr/bin/python3", "-I", "-B", "-c")
-    assert runner.command[5:7] == ("/usr/bin/env", "-i")
+    assert runner.command[:5] == ("/usr/bin/python3", "-I", "-B", "-S", "-c")
+    assert runner.command[6:8] == ("/usr/bin/env", "-i")
     assert runner.command[-2:] == ("/opt/reviewed/tool", "--version")
 
 

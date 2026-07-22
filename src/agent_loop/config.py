@@ -10,7 +10,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .constants import (
+    DEFAULT_AUTHOR_EFFORT,
+    DEFAULT_AUTHOR_MODEL,
     DEFAULT_AUTHOR_TIMEOUT_SECONDS,
+    DEFAULT_CRITIC_EFFORT,
+    DEFAULT_CRITIC_MODEL,
     DEFAULT_CRITIC_TIMEOUT_SECONDS,
     DEFAULT_MAX_PATH_BYTES,
     DEFAULT_MAX_PATH_DEPTH,
@@ -20,6 +24,7 @@ from .constants import (
     DEFAULT_VALIDATION_TIMEOUT_SECONDS,
     Limits,
 )
+from .credentials import DEFAULT_CLAUDE_CREDENTIAL_ID, DEFAULT_CODEX_CREDENTIAL_ID
 from .errors import AgentLoopError
 from .filesystem import read_confined_absolute_file
 
@@ -60,12 +65,12 @@ class ProjectConfig:
     opaque_nonsemantic_paths: tuple[str, ...] = ()
     review_context_paths: tuple[str, ...] = ()
     read_only_toolchain_mounts: tuple[str, ...] = ()
-    author_model: str | None = None
-    author_effort: str | None = None
-    critic_model: str | None = None
-    critic_effort: str | None = None
-    codex_credential_id: str | None = None
-    claude_credential_id: str | None = None
+    author_model: str | None = DEFAULT_AUTHOR_MODEL
+    author_effort: str | None = DEFAULT_AUTHOR_EFFORT
+    critic_model: str | None = DEFAULT_CRITIC_MODEL
+    critic_effort: str | None = DEFAULT_CRITIC_EFFORT
+    codex_credential_id: str | None = DEFAULT_CODEX_CREDENTIAL_ID
+    claude_credential_id: str | None = DEFAULT_CLAUDE_CREDENTIAL_ID
     max_rounds: int = DEFAULT_MAX_ROUNDS
     max_runtime_seconds: int = DEFAULT_MAX_RUNTIME_SECONDS
     author_timeout_seconds: int = DEFAULT_AUTHOR_TIMEOUT_SECONDS
@@ -121,10 +126,7 @@ def _patterns(value: object, *, name: str) -> tuple[str, ...]:
     for pattern in result:
         encoded = pattern.encode("utf-8")
         parts = PurePosixPath(pattern).parts
-        if (
-            len(encoded) > DEFAULT_MAX_PATH_BYTES
-            or len(parts) > DEFAULT_MAX_PATH_DEPTH
-        ):
+        if len(encoded) > DEFAULT_MAX_PATH_BYTES or len(parts) > DEFAULT_MAX_PATH_DEPTH:
             raise ValueError(f"{name} exceeds the path-pattern bound")
         if pattern.startswith("/") or "\\" in pattern:
             raise ValueError(f"{name} patterns must be relative POSIX paths")
@@ -138,12 +140,7 @@ def _protected_opt_ins(value: object) -> tuple[str, ...]:
     for path in result:
         if any(character in path for character in "*?["):
             raise ValueError("protected_opt_in_paths must contain exact paths")
-        if (
-            path == ".git"
-            or path.startswith(".git/")
-            or path.endswith("/.git")
-            or "/.git/" in path
-        ):
+        if path == ".git" or path.startswith(".git/") or path.endswith("/.git") or "/.git/" in path:
             raise ValueError("protected_opt_in_paths cannot select a Git control path")
     return result
 
@@ -226,15 +223,31 @@ def project_config_from_mapping(raw: dict[str, Any]) -> ProjectConfig:
             raw.get("review_context_paths", []), name="review_context_paths"
         ),
         read_only_toolchain_mounts=mounts,
-        author_model=_optional_string(raw.get("author_model"), name="author_model"),
-        author_effort=_optional_string(raw.get("author_effort"), name="author_effort"),
-        critic_model=_optional_string(raw.get("critic_model"), name="critic_model"),
-        critic_effort=_optional_string(raw.get("critic_effort"), name="critic_effort"),
+        author_model=_optional_string(
+            raw.get("author_model", DEFAULT_AUTHOR_MODEL),
+            name="author_model",
+        ),
+        author_effort=_optional_string(
+            raw.get("author_effort", DEFAULT_AUTHOR_EFFORT),
+            name="author_effort",
+        ),
+        critic_model=_optional_string(
+            raw.get("critic_model", DEFAULT_CRITIC_MODEL),
+            name="critic_model",
+        ),
+        critic_effort=_optional_string(
+            raw.get("critic_effort", DEFAULT_CRITIC_EFFORT),
+            name="critic_effort",
+        ),
         codex_credential_id=_optional_string(
-            raw.get("codex_credential_id"), name="codex_credential_id", identifier=True
+            raw.get("codex_credential_id", DEFAULT_CODEX_CREDENTIAL_ID),
+            name="codex_credential_id",
+            identifier=True,
         ),
         claude_credential_id=_optional_string(
-            raw.get("claude_credential_id"), name="claude_credential_id", identifier=True
+            raw.get("claude_credential_id", DEFAULT_CLAUDE_CREDENTIAL_ID),
+            name="claude_credential_id",
+            identifier=True,
         ),
         max_rounds=_positive_int(
             raw.get("max_rounds"), name="max_rounds", default=DEFAULT_MAX_ROUNDS

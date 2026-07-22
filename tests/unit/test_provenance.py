@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import grp
 import os
 import pwd
 from pathlib import Path
@@ -75,10 +76,14 @@ def test_reviewed_closure_rejects_links_special_entries_and_extended_metadata(
     selected_identity = (selected.stat().st_dev, selected.stat().st_ino)
 
     def attributes(path: int | Path, *, follow_symlinks: bool = True) -> list[str]:
-        if isinstance(path, int) and (
-            os.fstat(path).st_dev,
-            os.fstat(path).st_ino,
-        ) == selected_identity:
+        if (
+            isinstance(path, int)
+            and (
+                os.fstat(path).st_dev,
+                os.fstat(path).st_ino,
+            )
+            == selected_identity
+        ):
             return ["user.unreviewed"]
         return original(path, follow_symlinks=follow_symlinks)
 
@@ -124,13 +129,13 @@ def test_reviewed_closure_rejects_group_writable_or_extended_metadata_ancestors(
     )
     with monkeypatch.context() as group_patch:
         group_patch.setattr(
-            provenance.grp,
+            grp,
             "getgrgid",
             lambda _group_id: SimpleNamespace(
                 gr_mem=(current.pw_name, foreign.pw_name),
             ),
         )
-        group_patch.setattr(provenance.pwd, "getpwall", lambda: [current, foreign])
+        group_patch.setattr(pwd, "getpwall", lambda: [current, foreign])
         with pytest.raises(ValueError, match="unsafe reviewed path ancestor"):
             closure_sha256(root)
     root.chmod(0o755)
@@ -139,10 +144,14 @@ def test_reviewed_closure_rejects_group_writable_or_extended_metadata_ancestors(
     ancestor_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
 
     def attributes(path: int | Path, *, follow_symlinks: bool = True) -> list[str]:
-        if isinstance(path, int) and (
-            os.fstat(path).st_dev,
-            os.fstat(path).st_ino,
-        ) == ancestor_identity:
+        if (
+            isinstance(path, int)
+            and (
+                os.fstat(path).st_dev,
+                os.fstat(path).st_ino,
+            )
+            == ancestor_identity
+        ):
             return ["user.unreviewed-ancestor"]
         return original(path, follow_symlinks=follow_symlinks)
 

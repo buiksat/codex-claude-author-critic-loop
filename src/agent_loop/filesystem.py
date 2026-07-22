@@ -38,9 +38,7 @@ from .models import BlobReader, EntryKind, ScanRecord, sha256_hex
 RESOLVE_NO_MAGICLINKS: Final = 0x02
 RESOLVE_NO_SYMLINKS: Final = 0x04
 RESOLVE_BENEATH: Final = 0x08
-REQUIRED_RESOLVE_FLAGS: Final = (
-    RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
-)
+REQUIRED_RESOLVE_FLAGS: Final = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
 SYS_OPENAT2_X86_64: Final = 437
 
 _LIBC = ctypes.CDLL(None, use_errno=True)
@@ -50,7 +48,7 @@ _LIBC.llistxattr.restype = ctypes.c_ssize_t
 
 
 class _OpenHow(ctypes.Structure):
-    _fields_ = [  # noqa: RUF012 - ctypes requires this mutable class descriptor
+    _fields_ = [
         ("flags", ctypes.c_uint64),
         ("mode", ctypes.c_uint64),
         ("resolve", ctypes.c_uint64),
@@ -565,8 +563,6 @@ class ConfinedFilesystem:
                 raise _unsafe_type(path, "literal link read requires a symlink")
             _reject_symlink_xattrs(parent_fd, name, path)
             target = os.readlink(name, dir_fd=parent_fd)
-            if not isinstance(target, bytes):
-                target = os.fsencode(target)
             after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if not _same_object(before, after):
                 raise _unsafe(path, "symlink was replaced while reading its target")
@@ -792,8 +788,6 @@ def _scan_directory(
             raise _unsafe_type(path, "symlink ownership differs from the normalized owner")
         try:
             target = os.readlink(name, dir_fd=directory_fd)
-            if not isinstance(target, bytes):
-                target = os.fsencode(target)
             after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except OSError as exc:
             raise _unsafe(path, f"literal symlink capture failed ({exc.errno})") from exc

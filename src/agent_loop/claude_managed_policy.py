@@ -18,20 +18,20 @@ from pathlib import Path
 from .provenance import closure_sha256
 from .sandbox import SandboxMount
 
-
 MANAGED_CLAUDE_BOUNDARY_PROTOCOL = "attested-v1"
 MANAGED_CLAUDE_BOUNDARY_ID = "reviewed-managed-boundary-v1"
 MANAGED_CLAUDE_BOUNDARY_MARKER = (
-    "AGENT_LOOP_MANAGED_CLAUDE_BOUNDARY_OK:"
-    f"{MANAGED_CLAUDE_BOUNDARY_ID}:credential_absent:scrub=1"
+    f"AGENT_LOOP_MANAGED_CLAUDE_BOUNDARY_OK:{MANAGED_CLAUDE_BOUNDARY_ID}:credential_absent:scrub=1"
+)
+MANAGED_CLAUDE_BOUNDARY_REDACTED_MARKER = (
+    f"AGENT_LOOP_MANAGED_CLAUDE_BOUNDARY_OK:{MANAGED_CLAUDE_BOUNDARY_ID}:"
+    "credential_absent:[REDACTED]"
 )
 
 MANAGED_CLAUDE_POLICY_SOURCE = "/etc/claude-code"
 MANAGED_CLAUDE_POLICY_TARGET = "/etc/claude-code"
 MANAGED_CLAUDE_POLICY_FILE = "managed-settings.json"
-MANAGED_CLAUDE_HELPER_SOURCE = (
-    "/usr/local/libexec/agent-loop-claude-boundary-attest"
-)
+MANAGED_CLAUDE_HELPER_SOURCE = "/usr/local/libexec/agent-loop-claude-boundary-attest"
 MANAGED_CLAUDE_HELPER_TARGET = MANAGED_CLAUDE_HELPER_SOURCE
 
 MAX_MANAGED_POLICY_BYTES = 64 * 1024
@@ -43,6 +43,27 @@ _ADMIN_GID = 0
 _DIRECTORY_MODES = frozenset({0o555, 0o755})
 _POLICY_FILE_MODES = frozenset({0o444, 0o644})
 _HELPER_FILE_MODES = frozenset({0o555, 0o755})
+
+
+def managed_claude_boundary_attested(output: bytes) -> bool:
+    """Recognize only the helper marker or pinned Claude's exact redaction.
+
+    Claude 2.1.215 retains the successful exit-2 SessionStart hook message in
+    verbose stderr but rewrites the assignment-shaped ``scrub=1`` suffix to
+    ``[REDACTED]``.  The root-owned helper closure proves the condition behind
+    that marker; this parser deliberately admits neither prefixes nor other
+    redaction spellings.
+    """
+
+    if not isinstance(output, bytes):
+        raise TypeError("managed Claude boundary output must be bytes")
+    return any(
+        marker.encode("ascii") in output
+        for marker in (
+            MANAGED_CLAUDE_BOUNDARY_MARKER,
+            MANAGED_CLAUDE_BOUNDARY_REDACTED_MARKER,
+        )
+    )
 
 
 def managed_claude_policy_document() -> dict[str, object]:
@@ -269,9 +290,7 @@ def inspect_managed_claude_boundary() -> ManagedClaudeBoundary:
         entries = os.listdir(policy_root)
     except OSError as exc:
         raise ValueError("managed Claude policy directory cannot be listed") from exc
-    if entries != [MANAGED_CLAUDE_POLICY_FILE] and set(entries) != {
-        MANAGED_CLAUDE_POLICY_FILE
-    }:
+    if entries != [MANAGED_CLAUDE_POLICY_FILE] and set(entries) != {MANAGED_CLAUDE_POLICY_FILE}:
         raise ValueError("managed Claude policy directory contains unexpected entries")
     policy_file = policy_root / MANAGED_CLAUDE_POLICY_FILE
     _verify_root_owned_path(
@@ -320,6 +339,7 @@ __all__ = [
     "MANAGED_CLAUDE_BOUNDARY_ID",
     "MANAGED_CLAUDE_BOUNDARY_MARKER",
     "MANAGED_CLAUDE_BOUNDARY_PROTOCOL",
+    "MANAGED_CLAUDE_BOUNDARY_REDACTED_MARKER",
     "MANAGED_CLAUDE_HELPER_SOURCE",
     "MANAGED_CLAUDE_HELPER_TARGET",
     "MANAGED_CLAUDE_POLICY_FILE",
@@ -327,5 +347,6 @@ __all__ = [
     "MANAGED_CLAUDE_POLICY_TARGET",
     "ManagedClaudeBoundary",
     "inspect_managed_claude_boundary",
+    "managed_claude_boundary_attested",
     "managed_claude_policy_document",
 ]
